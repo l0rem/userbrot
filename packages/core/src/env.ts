@@ -15,7 +15,13 @@ const envSchema = z.object({
     .string()
     .regex(/^\d+$/)
     .optional(),
-  OPENROUTER_API_KEY: z.string().optional()
+  OPENROUTER_API_KEY: z.string().optional(),
+  LLM_BASE_URL: z.string().url().optional(),
+  LLM_API_KEY: z.string().optional(),
+  LLM_MODEL: z.string().min(1).optional(),
+  EMBEDDING_BASE_URL: z.string().url().optional(),
+  EMBEDDING_API_KEY: z.string().optional(),
+  EMBEDDING_MODEL: z.string().min(1).optional()
 });
 
 export type Env = z.infer<typeof envSchema>;
@@ -97,5 +103,37 @@ export function requireMtprotoApiCredentials(): { apiId: number; apiHash: string
   return {
     apiId: env.TG_API_ID,
     apiHash: env.TG_API_HASH
+  };
+}
+
+export type LlmProviderConfig = {
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+};
+
+export function requireLlmProviderConfig(): LlmProviderConfig {
+  const env = getEnv();
+
+  const apiKey = env.LLM_API_KEY ?? env.OPENROUTER_API_KEY;
+  if (!apiKey) {
+    throw new Error("LLM_API_KEY or OPENROUTER_API_KEY must be set in environment");
+  }
+
+  return {
+    baseUrl: env.LLM_BASE_URL ?? "https://openrouter.ai/api/v1",
+    apiKey,
+    model: env.LLM_MODEL ?? "openai/gpt-4o-mini"
+  };
+}
+
+export function requireEmbeddingProviderConfig(): LlmProviderConfig {
+  const llm = requireLlmProviderConfig();
+  const env = getEnv();
+
+  return {
+    baseUrl: env.EMBEDDING_BASE_URL ?? llm.baseUrl,
+    apiKey: env.EMBEDDING_API_KEY ?? llm.apiKey,
+    model: env.EMBEDDING_MODEL ?? "openai/text-embedding-3-small"
   };
 }

@@ -150,6 +150,7 @@
 
     {#if state.status === "configured"}
       <p class="success">Setup completed. Session is stored and ready for userbot reuse.</p>
+      <p class="next-step"><a href="/sync">Continue to chat sync</a></p>
     {/if}
 
     <button class="danger" on:click={resetSetup} disabled={busy}>Reset setup</button>
@@ -210,6 +211,21 @@
     color: #1f6235;
     padding: 10px 12px;
     font-size: 0.95rem;
+  }
+
+  .next-step {
+    margin: 10px 0 0;
+    font-size: 0.95rem;
+  }
+
+  .next-step a {
+    color: #1457cf;
+    font-weight: 700;
+    text-decoration: none;
+  }
+
+  .next-step a:hover {
+    text-decoration: underline;
   }
 
   label {

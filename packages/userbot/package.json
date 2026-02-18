@@ -5,6 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "bun run src/index.ts",
+    "debug:probe-history": "bun run src/debug/probe-history.ts",
+    "debug:estimate-chat": "bun run src/debug/estimate-chat.ts",
+    "debug:verify-sync": "bun run src/debug/verify-sync.ts",
     "check": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {

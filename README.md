@@ -47,12 +47,19 @@ Copy `.env.example` to `.env` and fill values.
 | `WEB_APP_URL` | Yes | Web app base URL | `http://localhost:3000` for local dev |
 | `OWNER_TELEGRAM_ID` | Optional | Lock setup to one Telegram user ID | Your Telegram numeric ID |
 | `SETUP_PHONE` | Optional | Prefills setup page phone input | Your phone in international format |
-| `OPENROUTER_API_KEY` | Optional | Reserved for future RAG feature | [openrouter.ai](https://openrouter.ai/) |
+| `OPENROUTER_API_KEY` | Optional | Backward-compatible key for OpenRouter | [openrouter.ai](https://openrouter.ai/) |
+| `LLM_BASE_URL` | Optional | OpenAI-compatible base URL for answers | Provider endpoint |
+| `LLM_API_KEY` | Optional | API key for `LLM_BASE_URL` | Provider dashboard |
+| `LLM_MODEL` | Optional | Chat model slug for RAG answers | Provider model list |
+| `EMBEDDING_BASE_URL` | Optional | OpenAI-compatible base URL for embeddings | Provider endpoint |
+| `EMBEDDING_API_KEY` | Optional | API key for embedding provider | Provider dashboard |
+| `EMBEDDING_MODEL` | Optional | Embedding model slug | Provider model list |
 
 Notes:
 
 - Telegram Mini App buttons require HTTPS. With localhost HTTP, bot falls back to text link.
 - Never commit `.env` or session strings.
+- If `LLM_API_KEY` is unset, `OPENROUTER_API_KEY` is used as fallback for Q&A.
 
 ---
 
@@ -95,7 +102,8 @@ bun run dev:userbot
 3. Enter Telegram login code
 4. If required, enter 2FA password
 5. Setup status becomes `configured`
-6. Run `bun run dev:userbot` to verify session reuse from DB
+6. Open `http://localhost:3000/sync`, choose private chats, and start synchronization
+7. Run `bun run dev:userbot` to process queued sync jobs
 
 If you need to start over, click **Reset setup** on `/setup`.
 
@@ -124,9 +132,12 @@ Implemented:
 - real Telegram auth (code + optional password)
 - setup state machine and persistent MTProto session storage
 - SvelteKit setup UI and API routes
+- private chat sync UI (`/sync`) with resumable run tracking and logs
+- userbot worker loop with checkpoint-based history backfill
+- minimal bot Q&A over synced messages (`/ask` or plain text)
 
 Planned next:
 
-- long-running message ingestion in userbot
-- vector storage and retrieval
-- OpenRouter-powered grounded answers over chat history
+- vector storage and hybrid retrieval (`pgvector` + FTS)
+- dedicated sync jobs management UI (retry/cancel/history)
+- media enrichment pipeline (voice/document understanding)

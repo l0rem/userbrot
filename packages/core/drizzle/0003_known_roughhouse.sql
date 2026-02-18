@@ -1,0 +1,1 @@
+ALTER TABLE "sync_checkpoints" ADD COLUMN "next_offset" integer;
