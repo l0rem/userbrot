@@ -1,0 +1,1 @@
+ALTER TABLE "setup_state" ADD COLUMN "auth_session_string" text;

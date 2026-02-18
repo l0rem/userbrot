@@ -1,0 +1,22 @@
+{
+  "name": "@userbrot/core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./db/schema": "./src/db/schema.ts",
+    "./db/client": "./src/db/client.ts",
+    "./env": "./src/env.ts",
+    "./services/setupService": "./src/services/setupService.ts"
+  },
+  "scripts": {
+    "check": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "dotenv": "^17.3.1",
+    "drizzle-orm": "^0.44.6",
+    "postgres": "^3.4.7",
+    "zod": "^4.1.12"
+  }
+}

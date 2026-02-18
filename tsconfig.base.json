@@ -1,0 +1,25 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "verbatimModuleSyntax": true,
+    "baseUrl": ".",
+    "paths": {
+      "@userbrot/core": [
+        "packages/core/src/index.ts"
+      ],
+      "@userbrot/core/*": [
+        "packages/core/src/*"
+      ]
+    },
+    "types": [
+      "bun"
+    ]
+  }
+}

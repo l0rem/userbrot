@@ -1,0 +1,14 @@
+{
+  "name": "@userbrot/bot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun run src/index.ts",
+    "check": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@userbrot/core": "workspace:*",
+    "gramio": "^0.5.0"
+  }
+}

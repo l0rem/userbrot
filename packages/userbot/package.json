@@ -1,0 +1,15 @@
+{
+  "name": "@userbrot/userbot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun run src/index.ts",
+    "check": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@mtcute/node": "^0.28.0",
+    "@userbrot/core": "workspace:*",
+    "drizzle-orm": "^0.44.6"
+  }
+}

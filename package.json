@@ -1,0 +1,24 @@
+{
+  "name": "userbrot",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "bun run --filter @userbrot/web dev",
+    "dev:web": "bun run --filter @userbrot/web dev",
+    "dev:bot": "bun run --filter @userbrot/bot dev",
+    "dev:userbot": "bun run --filter @userbrot/userbot dev",
+    "build": "bun run --filter @userbrot/web build",
+    "check": "bun run --filter @userbrot/core check && bun run --filter @userbrot/web check && bun run --filter @userbrot/bot check && bun run --filter @userbrot/userbot check",
+    "db:generate": "bunx drizzle-kit generate --config packages/core/drizzle.config.ts",
+    "db:migrate": "bunx drizzle-kit migrate --config packages/core/drizzle.config.ts",
+    "db:studio": "bunx drizzle-kit studio --config packages/core/drizzle.config.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "drizzle-kit": "^0.31.6",
+    "typescript": "^5.9.2"
+  }
+}
