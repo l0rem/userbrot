@@ -30,7 +30,7 @@ packages/
 - `packages/web/src/routes/embeddings/+page.svelte` - embeddings operations UI
 - `packages/web/src/routes/api/setup/*` - setup API endpoints
 - `packages/web/src/routes/api/sync/*` - sync catalog/estimate/start/status endpoints
-- `packages/web/src/routes/api/embeddings/*` - embeddings catalog/estimate/start/status/reset endpoints
+- `packages/web/src/routes/api/embeddings/*` - embeddings catalog/estimate/start/status/stop/reset endpoints
 - `packages/web/src/lib/server/mtprotoGateway.ts` - Telegram auth gateway
 - `packages/web/src/lib/server/syncGateway.ts` - dialog catalog + estimate gateway
 

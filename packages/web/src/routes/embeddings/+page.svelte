@@ -39,12 +39,14 @@
     startedAt: string | null;
     finishedAt: string | null;
     lastError: string | null;
+    updatedAt?: string;
   };
 
   type RunLog = {
     id: number;
     level: string;
     message: string;
+    meta: Record<string, unknown> | null;
     createdAt: string;
   };
 
@@ -56,13 +58,18 @@
   let activeRun: Run | null = null;
   let latestRun: Run | null = null;
   let logs: RunLog[] = [];
+  let progressByPeerId = new Map<string, { processed: number; total: number | null }>();
   let hiddenAvatarPeerIds = new Set<string>();
   let busyCatalog = false;
   let busyEstimate = false;
   let busyStart = false;
+  let busyStop = false;
   let busyReset = false;
   let busyDebugClear = false;
   let uiError = "";
+  let uiNotice = "";
+  let busyStatus = false;
+  let lastStatusAt: Date | null = null;
   let pollTimer: ReturnType<typeof setInterval> | null = null;
 
   const statusLabel: Record<Chat["status"], string> = {
@@ -83,24 +90,27 @@
     return payload;
   }
 
-  function formatSeconds(value: number | null): string {
-    if (value === null || value <= 0) {
-      return "-";
+  function formatThroughput(run: Run): string {
+    if (!run.startedAt || run.processedMessages <= 0) {
+      return "Throughput -";
     }
 
-    const hours = Math.floor(value / 3600);
-    const minutes = Math.floor((value % 3600) / 60);
-    const seconds = value % 60;
-
-    if (hours > 0) {
-      return `${hours}h ${minutes}m`;
+    const startedAtMs = new Date(run.startedAt).getTime();
+    if (!Number.isFinite(startedAtMs)) {
+      return "Throughput -";
     }
 
-    if (minutes > 0) {
-      return `${minutes}m ${seconds}s`;
+    const elapsedMinutes = (Date.now() - startedAtMs) / 60000;
+    if (!Number.isFinite(elapsedMinutes) || elapsedMinutes <= 0) {
+      return "Throughput -";
     }
 
-    return `${seconds}s`;
+    const perMinute = run.processedMessages / elapsedMinutes;
+    if (!Number.isFinite(perMinute) || perMinute <= 0) {
+      return "Throughput -";
+    }
+
+    return `Throughput ${perMinute.toFixed(perMinute >= 100 ? 0 : 1)} msgs/min`;
   }
 
   function compactText(value: string, max = 260): string {
@@ -111,12 +121,74 @@
     return `${value.slice(0, max - 3)}...`;
   }
 
+  function formatStatusTime(value: Date | null): string {
+    if (!value) {
+      return "never";
+    }
+
+    return value.toLocaleTimeString();
+  }
+
+  function formatRunActivity(run: Run): string {
+    if (!run.updatedAt) {
+      return "Activity unknown";
+    }
+
+    const updatedMs = new Date(run.updatedAt).getTime();
+    if (!Number.isFinite(updatedMs)) {
+      return "Activity unknown";
+    }
+
+    const secondsAgo = Math.max(0, Math.floor((Date.now() - updatedMs) / 1000));
+    if (secondsAgo < 5) {
+      return "Activity just now";
+    }
+
+    if (secondsAgo < 60) {
+      return `Activity ${secondsAgo}s ago`;
+    }
+
+    const minutesAgo = Math.floor(secondsAgo / 60);
+    return `Activity ${minutesAgo}m ago`;
+  }
+
   function formatChatEstimate(chat: Chat): string | null {
     if (chat.estimatedMessages === null) {
       return null;
     }
 
     return `${chat.estimatedMessages} msgs`;
+  }
+
+  function toFiniteNumber(value: unknown): number | null {
+    if (typeof value !== "number" || !Number.isFinite(value)) {
+      return null;
+    }
+
+    return value;
+  }
+
+  function formatCurrentChatProgress(chat: Chat): string | null {
+    const progress = progressByPeerId.get(chat.peerId);
+    if (!progress) {
+      return null;
+    }
+
+    const processed = Math.max(0, Math.floor(progress.processed));
+    const fallbackTotal =
+      typeof chat.estimatedMessages === "number" && Number.isFinite(chat.estimatedMessages)
+        ? Math.max(0, Math.floor(chat.estimatedMessages))
+        : null;
+    const total =
+      progress.total !== null
+        ? Math.max(0, Math.floor(progress.total))
+        : fallbackTotal;
+
+    if (total !== null && total > 0) {
+      return `${Math.min(processed, total)}/${total}`;
+    }
+
+    return `${processed}/?`;
   }
 
   function applySelectionFromChats(items: Chat[]) {
@@ -164,6 +236,7 @@
   }
 
   async function loadStatus() {
+    busyStatus = true;
     try {
       const payload = await request<{
         model: string;
@@ -178,8 +251,11 @@
       latestRun = payload.latestRun;
       logs = payload.logs;
       chats = mergeStatusChats(payload.chats);
+      lastStatusAt = new Date();
     } catch (error) {
       uiError = error instanceof Error ? error.message : String(error);
+    } finally {
+      busyStatus = false;
     }
   }
 
@@ -247,6 +323,7 @@
   async function startEmbeddings() {
     busyStart = true;
     uiError = "";
+    uiNotice = "";
 
     try {
       const selected = Array.from(selectedPeerIds);
@@ -254,17 +331,53 @@
         throw new Error("Select at least one chat to start embeddings");
       }
 
-      await request<{ run: Run }>("/api/embeddings/start", {
+      const payload = await request<{ run: Run; reusedExistingRun?: boolean }>("/api/embeddings/start", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ chatPeerIds: selected })
       });
+
+      activeRun = payload.run;
+      latestRun = payload.run;
+      uiNotice = payload.reusedExistingRun
+        ? `Run #${payload.run.id} is already active, resuming from current progress.`
+        : payload.run.status === "queued"
+          ? `Run #${payload.run.id} queued. Worker will pick it up shortly.`
+          : `Run #${payload.run.id} started.`;
 
       await loadStatus();
     } catch (error) {
       uiError = error instanceof Error ? error.message : String(error);
     } finally {
       busyStart = false;
+    }
+  }
+
+  async function stopEmbeddings() {
+    if (!activeRun || (activeRun.status !== "queued" && activeRun.status !== "running")) {
+      return;
+    }
+
+    busyStop = true;
+    uiError = "";
+    uiNotice = "";
+
+    try {
+      const payload = await request<{ stopped: boolean; run: Run | null }>("/api/embeddings/stop", {
+        method: "POST"
+      });
+
+      if (payload.stopped && payload.run) {
+        uiNotice = `Run #${payload.run.id} stopped.`;
+      } else {
+        uiNotice = "No active embedding run to stop.";
+      }
+
+      await loadStatus();
+    } catch (error) {
+      uiError = error instanceof Error ? error.message : String(error);
+    } finally {
+      busyStop = false;
     }
   }
 
@@ -380,6 +493,26 @@
     activeRun && activeRun.estimatedMessages > 0
       ? Math.min(100, Math.round((activeRun.processedMessages / activeRun.estimatedMessages) * 100))
       : 0;
+  $: progressByPeerId = (() => {
+    const next = new Map<string, { processed: number; total: number | null }>();
+
+    for (const log of logs) {
+      if (log.message !== "Embedded message batch" || !log.meta) {
+        continue;
+      }
+
+      const peerId = typeof log.meta.chatPeerId === "string" ? log.meta.chatPeerId : null;
+      const processed = toFiniteNumber(log.meta.processedInChat);
+      if (!peerId || processed === null) {
+        continue;
+      }
+
+      const total = toFiniteNumber(log.meta.targetMessages);
+      next.set(peerId, { processed, total });
+    }
+
+    return next;
+  })();
 
   onMount(() => {
     Promise.all([loadCatalog(), loadStatus()]).catch((error) => {
@@ -414,12 +547,26 @@
       <p class="error">{uiError}</p>
     {/if}
 
+    {#if uiNotice}
+      <p class="notice">{uiNotice}</p>
+    {/if}
+
     <section class="run-panel">
       <div class="run-head">
         <h2>Run status</h2>
-        <button type="button" class="danger" on:click={clearEmbeddingsDataDebug} disabled={busyDebugClear}>
-          {busyDebugClear ? "Clearing..." : "Debug: clear embeddings"}
-        </button>
+        <div class="run-head-right">
+          <span class="poll-meta" aria-live="polite">
+            {busyStatus ? "Refreshing..." : `Updated ${formatStatusTime(lastStatusAt)}`}
+          </span>
+          {#if activeRun && (activeRun.status === "queued" || activeRun.status === "running")}
+            <button type="button" class="warning" on:click={stopEmbeddings} disabled={busyStop}>
+              {busyStop ? "Stopping..." : "Stop run"}
+            </button>
+          {/if}
+          <button type="button" class="danger" on:click={clearEmbeddingsDataDebug} disabled={busyDebugClear}>
+            {busyDebugClear ? "Clearing..." : "Debug: clear embeddings"}
+          </button>
+        </div>
       </div>
       {#if activeRun}
         <p>
@@ -435,7 +582,7 @@
           <div class="progress" style={`width: ${progress}%`}></div>
         </div>
         <p class="run-meta">
-          {activeRun.processedMessages}/{activeRun.estimatedMessages || "?"} messages · {activeRun.completedChats}/{activeRun.totalChats} chats · ETA {formatSeconds(activeRun.etaSeconds)}
+          {activeRun.processedMessages} messages processed · {activeRun.completedChats}/{activeRun.totalChats} chats · {formatThroughput(activeRun)} · {formatRunActivity(activeRun)}
         </p>
       {:else if latestRun}
         <p>
@@ -457,6 +604,8 @@
             </p>
           {/each}
         </div>
+      {:else if activeRun}
+        <p class="hint">No worker logs yet for this run. If it stays empty, ensure <code>bun run dev:userbot</code> is running.</p>
       {/if}
     </section>
 
@@ -478,7 +627,14 @@
           <button type="button" on:click={resetSelected} disabled={busyReset || selectedPeerIds.size === 0}>
             {busyReset ? "Resetting..." : "Reset selected"}
           </button>
-          <button type="button" class="primary" on:click={startEmbeddings} disabled={busyStart || selectedPeerIds.size === 0}>Start embeddings</button>
+          <button
+            type="button"
+            class="primary"
+            on:click={startEmbeddings}
+            disabled={busyStart || selectedPeerIds.size === 0 || activeRun?.status === "queued" || activeRun?.status === "running"}
+          >
+            {busyStart ? "Starting..." : activeRun?.status === "queued" || activeRun?.status === "running" ? "Run in progress" : "Start embeddings"}
+          </button>
         </div>
       </div>
 
@@ -535,11 +691,11 @@
                   <span class="pin" title="Pinned in Telegram">📌</span>
                 {/if}
                 <span class={`status ${chat.status}`}>{statusLabel[chat.status]}</span>
+                {#if chat.status === "embedding" && formatCurrentChatProgress(chat)}
+                  <span class="chat-progress">{formatCurrentChatProgress(chat)}</span>
+                {/if}
                 {#if formatChatEstimate(chat)}
                   <span>{formatChatEstimate(chat)}</span>
-                {/if}
-                {#if chat.estimatedEtaSeconds !== null && chat.status !== "embedded"}
-                  <span>ETA {formatSeconds(chat.estimatedEtaSeconds)}</span>
                 {/if}
               </div>
             </li>
@@ -616,6 +772,14 @@
     padding: 10px 12px;
   }
 
+  .notice {
+    border: 1px solid #b9dfc4;
+    border-radius: 12px;
+    background: #eef9f1;
+    color: #235f36;
+    padding: 10px 12px;
+  }
+
   .run-panel {
     border: 1px solid #d9e9d8;
     border-radius: 14px;
@@ -631,11 +795,32 @@
     margin-bottom: 8px;
   }
 
+  .run-head-right {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .poll-meta {
+    font-size: 0.82rem;
+    color: #5c7a66;
+  }
+
   .danger {
     border: 1px solid #f0b5b5;
     border-radius: 10px;
     background: #fff4f4;
     color: #8b1d1d;
+    padding: 8px 12px;
+    cursor: pointer;
+    font-weight: 600;
+  }
+
+  .warning {
+    border: 1px solid #e9c98b;
+    border-radius: 10px;
+    background: #fff8e8;
+    color: #8a5b17;
     padding: 8px 12px;
     cursor: pointer;
     font-weight: 600;
@@ -864,6 +1049,15 @@
     flex-wrap: wrap;
     justify-content: flex-end;
     font-size: 0.85rem;
+  }
+
+  .chat-progress {
+    border-radius: 999px;
+    border: 1px solid #bfd9c5;
+    background: #f2fbf3;
+    color: #2f6d3e;
+    padding: 3px 8px;
+    font-variant-numeric: tabular-nums;
   }
 
   .status {

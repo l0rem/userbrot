@@ -1,5 +1,8 @@
 import { requireEmbeddingProviderConfig } from "@userbrot/core/env";
-import { enqueueEmbeddingRun } from "@userbrot/core/services/embeddingsService";
+import {
+  enqueueEmbeddingRun,
+  getActiveEmbeddingRun
+} from "@userbrot/core/services/embeddingsService";
 import { json } from "@sveltejs/kit";
 import { z } from "zod";
 import type { RequestHandler } from "./$types";
@@ -18,9 +21,11 @@ export const POST: RequestHandler = async (event) => {
     const model = requireEmbeddingProviderConfig().model;
     const chatPeerIds = payload.chatPeerIds.map((value) => BigInt(value));
 
-    const run = await enqueueEmbeddingRun(ownerTelegramId, chatPeerIds, model);
+    const existing = await getActiveEmbeddingRun(ownerTelegramId);
+    const run = existing ?? (await enqueueEmbeddingRun(ownerTelegramId, chatPeerIds, model));
 
     return json({
+      reusedExistingRun: existing !== null,
       run: {
         ...run,
         ownerTelegramId: run.ownerTelegramId.toString(),

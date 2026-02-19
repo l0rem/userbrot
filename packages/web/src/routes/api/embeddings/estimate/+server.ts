@@ -32,17 +32,15 @@ export const POST: RequestHandler = async (event) => {
 
       try {
         const estimatedMessages = await countPendingEmbeddingsForChat(ownerTelegramId, chatPeerId, model);
-        const estimatedEtaSeconds = estimatedMessages > 0 ? Math.ceil(estimatedMessages / 45) : 0;
-
         await setEmbeddingTargetEstimate(ownerTelegramId, chatPeerId, {
           estimatedMessages,
-          estimatedEtaSeconds
+          estimatedEtaSeconds: null
         });
 
         estimates.push({
           peerId,
           estimatedMessages,
-          estimatedEtaSeconds,
+          estimatedEtaSeconds: null,
           estimateMode: "exact"
         });
       } catch {

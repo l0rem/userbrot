@@ -102,7 +102,13 @@ bun run dev:userbot
 5. Setup status becomes `configured`
 6. Open `http://localhost:3000/sync`, choose private chats, and start synchronization
 7. Open `http://localhost:3000/embeddings`, select synced chats, and queue embedding runs
-8. Run `bun run dev:userbot` to process queued sync + embedding jobs
+8. Run `bun run dev:userbot` to process queued/running sync + embedding jobs
+
+Embeddings run controls:
+
+- The worker resumes interrupted embedding runs from saved checkpoints when restarted.
+- The `/embeddings` page exposes **Stop run**; stopping a run preserves checkpoints, so starting again continues remaining messages.
+- Run status shows processed messages + throughput + recent activity timestamp (ETA removed for embeddings).
 
 If you need to start over, click **Reset setup** on `/setup`.
 
@@ -138,10 +144,15 @@ Implemented:
 - private chat sync UI (`/sync`) with resumable run tracking, logs, bulk select, and bot/deleted-account filtering
 - userbot worker loop with checkpoint-based history backfill + new-message catch-up + peer cache recovery
 - embeddings operations UI (`/embeddings`) with per-chat estimates, run logs, reset selected chats, and full debug clear
-- embeddings worker loop in `dev:userbot` (single process handling both sync and embeddings queues)
+- embeddings worker loop in `dev:userbot` (single process handling both sync and embeddings queues) with retry/backoff, resumable checkpoints, and restart-safe run pickup
+- embeddings run controls: stop active run from UI and resume remaining messages on next start
 - minimal bot Q&A over synced messages (`/ask` or plain text) with thread/topic reply context preserved
+
+Progress snapshot (2026-02-19):
+
+- all currently synced private chats are fully embedded
 
 Planned next:
 
-- hybrid retrieval (`pgvector` + FTS) for improved Q&A relevance
+- iterate on RAG and chat quality (hybrid retrieval, ranking, and answer generation improvements)
 - media enrichment pipeline (voice/document understanding)

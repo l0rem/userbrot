@@ -65,8 +65,12 @@ Use this section to resume quickly tomorrow.
 - Embeddings pipeline is now active: `/embeddings` UI + queue/runs/logs/checkpoints + per-chat reset.
 - `dev:userbot` now processes both sync runs and embedding runs in one worker process.
 - Embedding API endpoint resolution now preserves provider path prefixes (e.g. `/v1`) and logs non-JSON provider responses with body preview.
+- Embeddings run handling is restart-safe: worker picks up existing `running` run on startup.
+- Embeddings runs can be stopped from UI (`Stop run`) and restarted later from checkpoints.
+- Embeddings UI now shows throughput + activity timestamp (ETA removed for embeddings).
 - Runtime owner is now resolved from persisted MTProto session instead of `OWNER_TELEGRAM_ID` env.
 - Added backup helpers for chats/messages/media export and per-chat import recovery.
+- All currently synced private chats are embedded.
 
 ### Verified on real data
 
@@ -109,8 +113,8 @@ SYNC_BACKUP_DIR=data/backups/<snapshot-dir> IMPORT_CHAT_PEER_ID=479829705 bun ru
 ### Embeddings implementation status
 
 1. Added embeddings schema + migration (`pgvector` extension, per-message vectors, embedding run/checkpoint tables).
-2. Added embeddings worker loop (claim queued run, batch generate, retry/backoff, resumable checkpoints).
-3. Added `/embeddings` UI page with per-chat status, progress, and reset actions.
+2. Added embeddings worker loop (claim queued/running run, batch generate, retry/backoff, resumable checkpoints).
+3. Added `/embeddings` UI page with per-chat status, progress, stop/reset actions, and run activity feedback.
 4. Remaining next: wire hybrid retrieval (vector + FTS) into `ragService` behind feature gating.
 
 ## RAG + Sync implementation tracker

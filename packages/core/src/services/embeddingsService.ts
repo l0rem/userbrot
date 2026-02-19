@@ -280,12 +280,22 @@ export async function enqueueEmbeddingRun(ownerTelegramId: bigint, chatPeerIds: 
 }
 
 export async function getActiveEmbeddingRun(_ownerTelegramId?: bigint) {
-  const run = await db.query.embeddingRuns.findFirst({ where: inArray(embeddingRuns.status, ["queued", "running"]), orderBy: [desc(embeddingRuns.createdAt)] });
-  return run ? mapRun(run) : null;
+  const running = await db.query.embeddingRuns.findFirst({ where: eq(embeddingRuns.status, "running"), orderBy: [desc(embeddingRuns.createdAt)] });
+  if (running) {
+    return mapRun(running);
+  }
+
+  const queued = await db.query.embeddingRuns.findFirst({ where: eq(embeddingRuns.status, "queued"), orderBy: [desc(embeddingRuns.createdAt)] });
+  return queued ? mapRun(queued) : null;
 }
 
 export async function getLatestEmbeddingRun(_ownerTelegramId?: bigint) {
   const run = await db.query.embeddingRuns.findFirst({ orderBy: [desc(embeddingRuns.createdAt)] });
+  return run ? mapRun(run) : null;
+}
+
+export async function getEmbeddingRunById(_ownerTelegramId: bigint, runId: number): Promise<EmbeddingRunInfo | null> {
+  const run = await db.query.embeddingRuns.findFirst({ where: eq(embeddingRuns.id, runId) });
   return run ? mapRun(run) : null;
 }
 
@@ -307,10 +317,52 @@ export async function appendEmbeddingRunLog(runId: number, _ownerTelegramId: big
 
 export async function claimQueuedEmbeddingRun(_ownerTelegramId: bigint): Promise<EmbeddingRunInfo | null> {
   return db.transaction(async (tx) => {
+    const running = await tx.query.embeddingRuns.findFirst({ where: eq(embeddingRuns.status, "running"), orderBy: [desc(embeddingRuns.createdAt)] });
+    if (running) {
+      return mapRun(running);
+    }
+
     const queued = await tx.query.embeddingRuns.findFirst({ where: eq(embeddingRuns.status, "queued"), orderBy: [asc(embeddingRuns.createdAt)] });
     if (!queued) return null;
     const updated = await tx.update(embeddingRuns).set({ status: "running", startedAt: new Date(), updatedAt: new Date() }).where(and(eq(embeddingRuns.id, queued.id), eq(embeddingRuns.status, "queued"))).returning();
     if (updated.length === 0) return null;
+    return mapRun(updated[0]);
+  });
+}
+
+export async function cancelActiveEmbeddingRun(_ownerTelegramId: bigint): Promise<EmbeddingRunInfo | null> {
+  return db.transaction(async (tx) => {
+    const active = await tx.query.embeddingRuns.findFirst({
+      where: inArray(embeddingRuns.status, ["queued", "running"]),
+      orderBy: [desc(embeddingRuns.createdAt)]
+    });
+
+    if (!active) {
+      return null;
+    }
+
+    const now = new Date();
+    const updated = await tx
+      .update(embeddingRuns)
+      .set({
+        status: "cancelled",
+        lastError: "Stopped by user",
+        finishedAt: now,
+        currentChatPeerId: null,
+        updatedAt: now
+      })
+      .where(and(eq(embeddingRuns.id, active.id), inArray(embeddingRuns.status, ["queued", "running"])))
+      .returning();
+
+    if (updated.length === 0) {
+      return null;
+    }
+
+    await tx
+      .update(embeddingTargets)
+      .set({ status: "pending", updatedAt: now })
+      .where(eq(embeddingTargets.status, "embedding"));
+
     return mapRun(updated[0]);
   });
 }
@@ -430,21 +482,31 @@ export async function countEligibleEmbeddingsForChat(_ownerTelegramId: bigint, c
 export async function upsertMessageEmbeddings(_ownerTelegramId: bigint, items: MessageEmbeddingUpsert[]) {
   if (items.length === 0) return;
   const now = new Date();
-  for (const item of items) {
-    await db.insert(telegramMessageEmbeddings).values({
-      chatPeerId: item.chatPeerId,
-      messageId: item.messageId,
-      model: item.model,
-      dimensions: item.embedding.length,
-      embedding: item.embedding,
-      sourceUpdatedAt: item.sourceUpdatedAt,
-      sourceText: item.sourceText,
-      updatedAt: now
-    }).onConflictDoUpdate({
+  await db
+    .insert(telegramMessageEmbeddings)
+    .values(
+      items.map((item) => ({
+        chatPeerId: item.chatPeerId,
+        messageId: item.messageId,
+        model: item.model,
+        dimensions: item.embedding.length,
+        embedding: item.embedding,
+        sourceUpdatedAt: item.sourceUpdatedAt,
+        sourceText: item.sourceText,
+        updatedAt: now
+      }))
+    )
+    .onConflictDoUpdate({
       target: [telegramMessageEmbeddings.chatPeerId, telegramMessageEmbeddings.messageId],
-      set: { model: item.model, dimensions: item.embedding.length, embedding: item.embedding, sourceUpdatedAt: item.sourceUpdatedAt, sourceText: item.sourceText, updatedAt: now }
+      set: {
+        model: sql`excluded.model`,
+        dimensions: sql`excluded.dimensions`,
+        embedding: sql`excluded.embedding`,
+        sourceUpdatedAt: sql`excluded.source_updated_at`,
+        sourceText: sql`excluded.source_text`,
+        updatedAt: sql`excluded.updated_at`
+      }
     });
-  }
 }
 
 export async function clearEmbeddingData(_ownerTelegramId: bigint) {

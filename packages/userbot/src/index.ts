@@ -11,6 +11,7 @@ import {
   db,
   failEmbeddingRun,
   failSyncRun,
+  getEmbeddingRunById,
   listEmbeddingRunChats,
   listPendingMessagesForEmbedding,
   listRunChats,
@@ -46,8 +47,9 @@ const IDLE_SLEEP_MS = 4000;
 const INTER_BATCH_DELAY_MS = 1100;
 const HISTORY_BATCH_SIZE = 100;
 const DIALOG_CACHE_WARM_LIMIT = 5000;
-const EMBEDDING_BATCH_SIZE = 64;
-const INTER_EMBEDDING_BATCH_DELAY_MS = 350;
+const EMBEDDING_BATCH_SIZE = 128;
+const EMBEDDING_REQUEST_CONCURRENCY = 3;
+const EMBEDDING_CHAT_MAX_ATTEMPTS = 4;
 
 const session = await db.query.mtprotoSessions.findFirst({
   orderBy: [desc(mtprotoSessions.updatedAt)]
@@ -321,6 +323,55 @@ function computeEtaSeconds(processedMessages: number, elapsedMs: number, remaini
   return Math.ceil(remainingMessages / throughput);
 }
 
+function parseStatusCodeFromError(error: unknown): number | null {
+  if (!(error instanceof Error)) {
+    return null;
+  }
+
+  const match = error.message.match(/status\s+(\d{3})/i);
+  if (!match) {
+    return null;
+  }
+
+  const parsed = Number.parseInt(match[1], 10);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+class EmbeddingRunStoppedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "EmbeddingRunStoppedError";
+  }
+}
+
+async function assertEmbeddingRunIsActive(run: EmbeddingRunInfo): Promise<void> {
+  const latest = await getEmbeddingRunById(run.ownerTelegramId, run.id);
+  if (!latest) {
+    throw new EmbeddingRunStoppedError(`Embedding run ${run.id} no longer exists`);
+  }
+
+  if (latest.status === "cancelled") {
+    throw new EmbeddingRunStoppedError(`Embedding run ${run.id} was stopped by user`);
+  }
+
+  if (latest.status === "completed" || latest.status === "failed") {
+    throw new EmbeddingRunStoppedError(`Embedding run ${run.id} already finished with status ${latest.status}`);
+  }
+}
+
+function chunkArray<T>(items: T[], chunkSize: number): T[][] {
+  if (chunkSize <= 0) {
+    return [items];
+  }
+
+  const chunks: T[][] = [];
+  for (let i = 0; i < items.length; i += chunkSize) {
+    chunks.push(items.slice(i, i + chunkSize));
+  }
+
+  return chunks;
+}
+
 async function withSafeEmbeddingCall<T>(fn: () => Promise<T>): Promise<T> {
   let attempt = 0;
 
@@ -331,7 +382,7 @@ async function withSafeEmbeddingCall<T>(fn: () => Promise<T>): Promise<T> {
       if (error instanceof Error) {
         const maybeStatus = error.message.match(/status\s+(\d{3})/i);
         const statusCode = maybeStatus ? Number.parseInt(maybeStatus[1], 10) : null;
-        const shouldRetry = statusCode === 408 || statusCode === 409 || statusCode === 429 || statusCode === 500 || statusCode === 502 || statusCode === 503 || statusCode === 504;
+        const shouldRetry = statusCode === 408 || statusCode === 409 || statusCode === 429 || statusCode === 500 || statusCode === 502 || statusCode === 503 || statusCode === 504 || statusCode === 529;
 
         if (shouldRetry) {
           const waitMs = Math.ceil(900 * (attempt + 1) + Math.random() * 600);
@@ -425,13 +476,28 @@ async function processEmbeddingChat(
   chatPeerId: bigint,
   knownEstimate: number | null
 ): Promise<void> {
+  await assertEmbeddingRunIsActive(run);
+
   const checkpoint = await loadEmbeddingCheckpoint(run.ownerTelegramId, chatPeerId);
   const estimatedMessages = await countPendingEmbeddingsForChat(run.ownerTelegramId, chatPeerId, run.model);
-  const estimatedEtaSeconds = estimatedMessages > 0 ? Math.ceil(estimatedMessages / 45) : 0;
+
+  await appendEmbeddingRunLog(
+    run.id,
+    run.ownerTelegramId,
+    checkpoint.nextMessageId && checkpoint.nextMessageId > 0
+      ? `Resuming embeddings chat ${chatPeerId.toString()} from checkpoint ${checkpoint.nextMessageId}`
+      : `Starting embeddings chat ${chatPeerId.toString()}`,
+    "info",
+    {
+      chatPeerId: chatPeerId.toString(),
+      checkpointNextMessageId: checkpoint.nextMessageId,
+      checkpointBackfillComplete: checkpoint.backfillComplete
+    }
+  );
 
   await setEmbeddingTargetEstimate(run.ownerTelegramId, chatPeerId, {
     estimatedMessages,
-    estimatedEtaSeconds
+    estimatedEtaSeconds: null
   });
 
   if (knownEstimate === null) {
@@ -443,18 +509,19 @@ async function processEmbeddingChat(
   await setEmbeddingTargetStatus(run.ownerTelegramId, chatPeerId, "embedding");
   await setEmbeddingRunCurrentChat(run.id, run.ownerTelegramId, chatPeerId);
 
-  const startedAt = Date.now();
   let processedInChat = 0;
   let nextMessageId = checkpoint.nextMessageId ?? 0;
   let wrappedToStart = false;
 
   while (true) {
+    await assertEmbeddingRunIsActive(run);
+
     const rows = await listPendingMessagesForEmbedding(
       run.ownerTelegramId,
       chatPeerId,
       run.model,
       nextMessageId,
-      EMBEDDING_BATCH_SIZE
+      EMBEDDING_BATCH_SIZE * EMBEDDING_REQUEST_CONCURRENCY
     );
 
     if (rows.length === 0) {
@@ -468,25 +535,28 @@ async function processEmbeddingChat(
       break;
     }
 
-    const vectors = await embedBatch(rows.map((row) => row.text));
+    const rowChunks = chunkArray(rows, EMBEDDING_BATCH_SIZE);
 
-    await upsertMessageEmbeddings(
-      run.ownerTelegramId,
-      rows.map((row, index) => ({
-        chatPeerId,
-        messageId: row.messageId,
-        model: run.model,
-        embedding: vectors[index],
-        sourceUpdatedAt: row.updatedAt,
-        sourceText: row.text
-      }))
+    await Promise.all(
+      rowChunks.map(async (rowChunk) => {
+        const vectors = await embedBatch(rowChunk.map((row) => row.text));
+
+        await upsertMessageEmbeddings(
+          run.ownerTelegramId,
+          rowChunk.map((row, index) => ({
+            chatPeerId,
+            messageId: row.messageId,
+            model: run.model,
+            embedding: vectors[index],
+            sourceUpdatedAt: row.updatedAt,
+            sourceText: row.text
+          }))
+        );
+      })
     );
 
     nextMessageId = rows[rows.length - 1]?.messageId ?? nextMessageId;
     processedInChat += rows.length;
-
-    const elapsedMs = Date.now() - startedAt;
-    const etaSeconds = computeEtaSeconds(processedInChat, elapsedMs, Math.max(estimatedMessages - processedInChat, 0));
 
     await saveEmbeddingCheckpoint(run.ownerTelegramId, chatPeerId, {
       nextMessageId,
@@ -494,8 +564,7 @@ async function processEmbeddingChat(
     });
 
     await updateEmbeddingRunProgress(run.id, run.ownerTelegramId, {
-      processedMessagesDelta: rows.length,
-      etaSeconds
+      processedMessagesDelta: rows.length
     });
 
     await appendEmbeddingRunLog(run.id, run.ownerTelegramId, "Embedded message batch", "info", {
@@ -503,10 +572,8 @@ async function processEmbeddingChat(
       batchSize: rows.length,
       nextMessageId,
       processedInChat,
-      etaSeconds
+      targetMessages: estimatedMessages
     });
-
-    await sleep(INTER_EMBEDDING_BATCH_DELAY_MS);
   }
 
   const pendingAfter = await countPendingEmbeddingsForChat(run.ownerTelegramId, chatPeerId, run.model);
@@ -520,12 +587,11 @@ async function processEmbeddingChat(
 
   await setEmbeddingTargetEstimate(run.ownerTelegramId, chatPeerId, {
     estimatedMessages: pendingAfter,
-    estimatedEtaSeconds: pendingAfter > 0 ? Math.ceil(pendingAfter / 45) : 0
+    estimatedEtaSeconds: null
   });
   await setEmbeddingTargetStatus(run.ownerTelegramId, chatPeerId, status, null);
   await updateEmbeddingRunProgress(run.id, run.ownerTelegramId, {
-    completedChatsDelta: 1,
-    etaSeconds: 0
+    completedChatsDelta: 1
   });
   await appendEmbeddingRunLog(run.id, run.ownerTelegramId, `Chat ${chatPeerId.toString()} embeddings updated`, "info", {
     processedMessages: processedInChat,
@@ -562,32 +628,108 @@ async function processEmbeddingRun(run: EmbeddingRunInfo): Promise<void> {
   const failedChats: Array<{ peerId: string; error: string }> = [];
 
   for (const chat of chats) {
-    try {
-      await processEmbeddingChat(run, chat.peerId, chat.estimatedMessages);
-    } catch (error) {
-      const errorMessage = normalizeErrorMessage(error);
-      const existing = await loadEmbeddingCheckpoint(run.ownerTelegramId, chat.peerId);
-      await setEmbeddingTargetStatus(run.ownerTelegramId, chat.peerId, "error", errorMessage);
-      await saveEmbeddingCheckpoint(run.ownerTelegramId, chat.peerId, {
-        nextMessageId: existing.nextMessageId,
-        backfillComplete: existing.backfillComplete,
-        lastError: errorMessage
-      });
-      failedChats.push({
-        peerId: chat.peerId.toString(),
-        error: errorMessage
-      });
+    await assertEmbeddingRunIsActive(run);
 
-      await appendEmbeddingRunLog(
-        run.id,
-        run.ownerTelegramId,
-        `Skipping failed embeddings chat ${chat.peerId.toString()}`,
-        "warn",
-        {
-          chatPeerId: chat.peerId.toString(),
-          error: errorMessage
+    let chatProcessed = false;
+
+    for (let attempt = 1; attempt <= EMBEDDING_CHAT_MAX_ATTEMPTS; attempt += 1) {
+      try {
+        await assertEmbeddingRunIsActive(run);
+        await processEmbeddingChat(run, chat.peerId, chat.estimatedMessages);
+        chatProcessed = true;
+        break;
+      } catch (error) {
+        if (error instanceof EmbeddingRunStoppedError) {
+          throw error;
         }
-      );
+
+        const errorMessage = normalizeErrorMessage(error);
+        const statusCode = parseStatusCodeFromError(error);
+        const existing = await loadEmbeddingCheckpoint(run.ownerTelegramId, chat.peerId);
+
+        await saveEmbeddingCheckpoint(run.ownerTelegramId, chat.peerId, {
+          nextMessageId: existing.nextMessageId,
+          backfillComplete: existing.backfillComplete,
+          lastError: errorMessage
+        });
+
+        if (attempt < EMBEDDING_CHAT_MAX_ATTEMPTS) {
+          const delayMs = Math.ceil(1200 * attempt * attempt + Math.random() * 1000);
+
+          await setEmbeddingTargetStatus(run.ownerTelegramId, chat.peerId, "embedding", errorMessage);
+
+          await appendEmbeddingRunLog(
+            run.id,
+            run.ownerTelegramId,
+            `Embedding chat ${chat.peerId.toString()} failed, retrying attempt ${attempt + 1}/${EMBEDDING_CHAT_MAX_ATTEMPTS}`,
+            "warn",
+            {
+              runId: run.id,
+              chatPeerId: chat.peerId.toString(),
+              attempt,
+              maxAttempts: EMBEDDING_CHAT_MAX_ATTEMPTS,
+              delayMs,
+              statusCode,
+              error: errorMessage,
+              nextMessageId: existing.nextMessageId,
+              backfillComplete: existing.backfillComplete
+            }
+          );
+
+          console.error("[embeddings] chat attempt failed, retrying", {
+            runId: run.id,
+            chatPeerId: chat.peerId.toString(),
+            attempt,
+            maxAttempts: EMBEDDING_CHAT_MAX_ATTEMPTS,
+            delayMs,
+            statusCode,
+            error: errorMessage,
+            nextMessageId: existing.nextMessageId,
+            backfillComplete: existing.backfillComplete
+          });
+
+          await sleep(delayMs);
+          continue;
+        }
+
+        await setEmbeddingTargetStatus(run.ownerTelegramId, chat.peerId, "error", errorMessage);
+        failedChats.push({
+          peerId: chat.peerId.toString(),
+          error: errorMessage
+        });
+
+        await appendEmbeddingRunLog(
+          run.id,
+          run.ownerTelegramId,
+          `Skipping failed embeddings chat ${chat.peerId.toString()}`,
+          "warn",
+          {
+            runId: run.id,
+            chatPeerId: chat.peerId.toString(),
+            attempt,
+            maxAttempts: EMBEDDING_CHAT_MAX_ATTEMPTS,
+            statusCode,
+            error: errorMessage,
+            nextMessageId: existing.nextMessageId,
+            backfillComplete: existing.backfillComplete
+          }
+        );
+
+        console.error("[embeddings] chat failed after retries, skipping", {
+          runId: run.id,
+          chatPeerId: chat.peerId.toString(),
+          attempt,
+          maxAttempts: EMBEDDING_CHAT_MAX_ATTEMPTS,
+          statusCode,
+          error: errorMessage,
+          nextMessageId: existing.nextMessageId,
+          backfillComplete: existing.backfillComplete
+        });
+      }
+    }
+
+    if (!chatProcessed) {
+      continue;
     }
   }
 
@@ -969,7 +1111,17 @@ try {
         await processEmbeddingRun(embeddingRun);
         await appendEmbeddingRunLog(embeddingRun.id, embeddingRun.ownerTelegramId, "Embedding run completed", "info");
       } catch (error) {
+        if (error instanceof EmbeddingRunStoppedError) {
+          await appendEmbeddingRunLog(embeddingRun.id, embeddingRun.ownerTelegramId, "Embedding run cancelled", "warn");
+          continue;
+        }
+
         const message = normalizeErrorMessage(error);
+        console.error("[embeddings] run failed", {
+          runId: embeddingRun.id,
+          ownerTelegramId: embeddingRun.ownerTelegramId.toString(),
+          error: message
+        });
         await appendEmbeddingRunLog(embeddingRun.id, embeddingRun.ownerTelegramId, `Run failed: ${message}`, "error");
         await failEmbeddingRun(embeddingRun.id, embeddingRun.ownerTelegramId, message);
       }
