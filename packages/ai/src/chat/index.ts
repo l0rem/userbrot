@@ -25,6 +25,7 @@ export type RunConversationOptions = {
   externalChatId: string;
   externalThreadId: string | null;
   userInput: string;
+  onChunk?: (chunk: string) => void | Promise<void>;
 };
 
 export type RunConversationResult = {
@@ -63,7 +64,19 @@ export async function runConversationTurn(
     finishedAt: null
   };
 
-  const result = await graph.invoke(initialState);
+  const invokeConfig = options.onChunk
+    ? {
+      callbacks: [
+        {
+          handleLLMNewToken(token: string) {
+            options.onChunk!(token);
+          }
+        }
+      ]
+    }
+    : undefined;
+
+  const result = await graph.invoke(initialState, invokeConfig);
 
   const durationMs = (result.finishedAt ?? Date.now()) - result.startedAt;
 

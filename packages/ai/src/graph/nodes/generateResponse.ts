@@ -15,8 +15,12 @@ export async function generateResponseNode(
     configuration: {
       baseURL: llmConfig.baseUrl
     },
-    temperature: 0.7
+    temperature: 0.7,
+    streaming: true
   });
+
+  // Bypass tiktoken error for non-OpenAI format models
+  model.getNumTokens = async () => 0;
 
   await messageRepo.add(state.conversationId, "user", state.userInput);
 

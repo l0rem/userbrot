@@ -1,7 +1,7 @@
-import { answerQuestionFromSyncedChats } from "@userbrot/core/services/ragService";
 import { getEnv, requireBotToken } from "@userbrot/core/env";
 import { runConversationTurn, type RunConversationResult } from "@userbrot/ai";
 import { Bot } from "gramio";
+import { telegramMarkdownToHtml } from "./utils/markdown";
 
 const token = requireBotToken();
 const webAppUrl = getEnv().WEB_APP_URL;
@@ -14,6 +14,7 @@ const AI_GRAPH_ENABLED = getEnv().AI_GRAPH_ENABLED === "1";
 type ReplyThreadParams = {
   message_thread_id?: number;
   direct_messages_topic_id?: number;
+  parse_mode?: "HTML" | "MarkdownV2" | "Markdown";
 };
 
 type IncomingPayload = Record<string, unknown>;
@@ -124,11 +125,32 @@ function buildCitationLine(citations: Array<{ chatTitle: string; messageId: numb
     .join(", ")}`;
 }
 
-async function answerWithStreamingDraft(context: ReplyContext, question: string): Promise<void> {
+// Removed legacy answerWithStreamingDraft (one-shot RAG)
+
+async function answerWithLangGraph(
+  context: ReplyContext,
+  userInput: string
+): Promise<void> {
   const payload = context.payload as IncomingPayload;
   const threadParams = extractThreadParams(payload);
+  const chatInfo = extractChatInfo(payload);
   const draftTarget = extractPrivateDraftTarget(payload);
   const draftId = createDraftId();
+
+  if (!chatInfo.chatId) {
+    await context.send("Could not identify chat context.", threadParams);
+    return;
+  }
+
+  const typingInterval = setInterval(async () => {
+    try {
+      await bot.api.sendChatAction({
+        chat_id: chatInfo.chatId!,
+        action: "typing",
+        ...(chatInfo.threadId && { message_thread_id: chatInfo.threadId })
+      });
+    } catch { }
+  }, 4000);
 
   let draftStreamingEnabled = Boolean(draftTarget);
   let lastDraftText = "";
@@ -154,7 +176,8 @@ async function answerWithStreamingDraft(context: ReplyContext, question: string)
         chat_id: draftTarget.chatId,
         message_thread_id: draftTarget.messageThreadId,
         draft_id: draftId,
-        text: nextDraft
+        text: telegramMarkdownToHtml(nextDraft),
+        parse_mode: "HTML"
       });
       lastDraftText = nextDraft;
       lastDraftSentAt = now;
@@ -163,64 +186,33 @@ async function answerWithStreamingDraft(context: ReplyContext, question: string)
     }
   };
 
-  const result = await answerQuestionFromSyncedChats(question, {
-    onPartialAnswer: async (partialAnswer) => {
-      await pushDraft(partialAnswer, false);
-    }
-  });
-
-  await pushDraft(result.answer, true);
-
-  const citationLine = buildCitationLine(result.citations);
-  await context.send(`${result.answer}${citationLine}`, threadParams);
-}
-
-async function answerWithLangGraph(
-  context: ReplyContext,
-  userInput: string
-): Promise<void> {
-  const payload = context.payload as IncomingPayload;
-  const threadParams = extractThreadParams(payload);
-  const chatInfo = extractChatInfo(payload);
-
-  if (!chatInfo.chatId) {
-    await context.send("Could not identify chat context.", threadParams);
-    return;
-  }
-
-  const thinkingMsg = await context.send("Thinking...", threadParams);
-
-  const typingInterval = setInterval(async () => {
-    try {
-      await bot.api.sendChatAction({
-        chat_id: chatInfo.chatId!,
-        action: "typing",
-        ...(chatInfo.threadId && { message_thread_id: chatInfo.threadId })
-      });
-    } catch {}
-  }, 4000);
-
   try {
     const result = await runConversationTurn({
       surface: "telegram_bot",
       externalChatId: String(chatInfo.chatId),
       externalThreadId: chatInfo.threadId ? String(chatInfo.threadId) : null,
-      userInput
+      userInput,
+      onChunk: async (chunk: string) => {
+        await pushDraft(lastDraftText + chunk, false);
+      }
     });
 
     clearInterval(typingInterval);
 
-    const responseText = truncateTelegramText(result.assistantOutput);
-
-    try {
-      await bot.api.editMessageText({
-        chat_id: chatInfo.chatId!,
-        message_id: (thinkingMsg as { message_id: number }).message_id,
-        text: responseText
-      });
-    } catch {
-      await context.send(responseText, threadParams);
+    if (draftStreamingEnabled && draftTarget) {
+      try {
+        await bot.api.sendMessageDraft({
+          chat_id: draftTarget.chatId,
+          message_thread_id: draftTarget.messageThreadId,
+          draft_id: draftId,
+          text: ""
+        });
+      } catch { }
     }
+
+    const responseText = truncateTelegramText(result.assistantOutput);
+    const htmlOutput = telegramMarkdownToHtml(responseText);
+    await context.send(htmlOutput, { ...threadParams, parse_mode: "HTML" });
   } catch (error) {
     clearInterval(typingInterval);
     const message = error instanceof Error ? error.message : String(error);
@@ -238,7 +230,7 @@ const bot = new Bot(token)
   .command("start", async (context) => {
     if (supportsTelegramWebApp) {
       await context.send(
-        "Welcome to userbrot. Use setup first, then sync chats, then ask questions in this bot.",
+        "Welcome to userbrot. Setup and sync your chats using the Web App buttons below, then send a message in this chat or topic to start an AI conversation.",
         {
           reply_markup: {
             inline_keyboard: [
@@ -267,9 +259,9 @@ const bot = new Bot(token)
 
     await context.send(
       "Welcome to userbrot. Setup Mini App button is disabled because WEB_APP_URL is not HTTPS.\n\n" +
-        `For local testing, open setup manually: ${setupUrl.toString()}\n` +
-        `After setup, open sync manually: ${syncUrl.toString()}\n` +
-        "To enable the in-chat setup button, expose web app via HTTPS tunnel and set WEB_APP_URL to that public URL."
+      `For local testing, open setup manually: ${setupUrl.toString()}\n` +
+      `After setup, open sync manually: ${syncUrl.toString()}\n` +
+      "To enable the in-chat setup button, expose web app via HTTPS tunnel and set WEB_APP_URL to that public URL."
     );
   })
   .command("topic", async (context) => {
@@ -345,22 +337,6 @@ const bot = new Bot(token)
       threadParams
     );
   })
-  .command("ask", async (context) => {
-    const question = context.args?.trim() ?? "";
-
-    if (!question) {
-      await context.send("Usage: /ask <question>");
-      return;
-    }
-
-    try {
-      await answerWithStreamingDraft(context, question);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      const threadParams = extractThreadParams(context.payload as unknown as IncomingPayload);
-      await context.send(`Failed to answer question: ${message}`, threadParams);
-    }
-  })
   .command("clear", async (context) => {
     const payload = context.payload as unknown as IncomingPayload;
     const threadParams = extractThreadParams(payload);
@@ -394,11 +370,7 @@ const bot = new Bot(token)
     }
 
     try {
-      if (AI_GRAPH_ENABLED) {
-        await answerWithLangGraph(context, text);
-      } else {
-        await answerWithStreamingDraft(context, text);
-      }
+      await answerWithLangGraph(context, text);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const threadParams = extractThreadParams(context.payload as unknown as IncomingPayload);
