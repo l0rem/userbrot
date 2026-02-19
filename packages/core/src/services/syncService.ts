@@ -121,7 +121,7 @@ function encodeChatPeerIds(ids: bigint[]): string[] {
 function mapRun(row: typeof syncRuns.$inferSelect): SyncRunInfo {
   return {
     id: row.id,
-    ownerTelegramId: row.ownerTelegramId,
+    ownerTelegramId: 0n,
     status: row.status,
     chatPeerIds: decodeChatPeerIds(row.chatPeerIds),
     totalChats: row.totalChats,
@@ -139,63 +139,21 @@ function mapRun(row: typeof syncRuns.$inferSelect): SyncRunInfo {
 }
 
 function sanitizeEstimatedMessages(estimatedMessages: number | null): number | null {
-  if (estimatedMessages === null) {
-    return null;
-  }
-
+  if (estimatedMessages === null) return null;
   const TELEGRAM_TOTAL_SENTINEL = 2_147_483_647;
-  if (estimatedMessages >= TELEGRAM_TOTAL_SENTINEL || estimatedMessages > 1_000_000_000) {
-    return null;
-  }
-
-  if (estimatedMessages < 0) {
-    return 0;
-  }
-
+  if (estimatedMessages >= TELEGRAM_TOTAL_SENTINEL || estimatedMessages > 1_000_000_000) return null;
+  if (estimatedMessages < 0) return 0;
   return estimatedMessages;
 }
 
-function sanitizeRunEstimates(run: SyncRunInfo | null): SyncRunInfo | null {
-  if (!run) {
-    return null;
-  }
-
-  const TELEGRAM_TOTAL_SENTINEL = 2_147_483_647;
-  const clearlyInvalidLegacyEstimate =
-    run.status !== "running" &&
-    run.processedMessages > 0 &&
-    run.estimatedMessages > run.processedMessages * 20;
-
-  if (
-    run.estimatedMessages >= TELEGRAM_TOTAL_SENTINEL ||
-    run.estimatedMessages > 1_000_000_000 ||
-    clearlyInvalidLegacyEstimate
-  ) {
-    return {
-      ...run,
-      estimatedMessages: Math.max(run.processedMessages, 0),
-      etaSeconds: run.status === "running" ? null : 0
-    };
-  }
-
-  return run;
-}
-
-export async function upsertDiscoveredPrivateChats(
-  ownerTelegramId: bigint,
-  chats: DiscoveredPrivateChat[]
-): Promise<void> {
-  if (chats.length === 0) {
-    return;
-  }
-
+export async function upsertDiscoveredPrivateChats(_ownerTelegramId: bigint, chats: DiscoveredPrivateChat[]) {
+  if (chats.length === 0) return;
   const now = new Date();
 
   for (const chat of chats) {
     await db
       .insert(telegramChats)
       .values({
-        ownerTelegramId,
         peerId: chat.peerId,
         peerType: "user",
         title: chat.title,
@@ -207,7 +165,7 @@ export async function upsertDiscoveredPrivateChats(
         updatedAt: now
       })
       .onConflictDoUpdate({
-        target: [telegramChats.ownerTelegramId, telegramChats.peerId],
+        target: telegramChats.peerId,
         set: {
           title: chat.title,
           username: chat.username,
@@ -221,19 +179,12 @@ export async function upsertDiscoveredPrivateChats(
   }
 }
 
-export async function listSyncCatalogChats(ownerTelegramId: bigint): Promise<SyncCatalogChat[]> {
+export async function listSyncCatalogChats(_ownerTelegramId?: bigint): Promise<SyncCatalogChat[]> {
   const storedMessageCounts = await db
-    .select({
-      chatPeerId: telegramMessages.chatPeerId,
-      total: sql<number>`count(*)::int`
-    })
+    .select({ chatPeerId: telegramMessages.chatPeerId, total: sql<number>`count(*)::int` })
     .from(telegramMessages)
-    .where(eq(telegramMessages.ownerTelegramId, ownerTelegramId))
     .groupBy(telegramMessages.chatPeerId);
-
-  const storedCountByPeerId = new Map(
-    storedMessageCounts.map((row) => [row.chatPeerId.toString(), row.total])
-  );
+  const storedCountByPeerId = new Map(storedMessageCounts.map((row) => [row.chatPeerId.toString(), row.total]));
 
   const rows = await db
     .select({
@@ -253,27 +204,17 @@ export async function listSyncCatalogChats(ownerTelegramId: bigint): Promise<Syn
       checkpointBackfillComplete: syncCheckpoints.backfillComplete
     })
     .from(telegramChats)
-    .leftJoin(
-      syncTargets,
-      and(
-        eq(syncTargets.ownerTelegramId, telegramChats.ownerTelegramId),
-        eq(syncTargets.chatPeerId, telegramChats.peerId)
-      )
-    )
-    .leftJoin(
-      syncCheckpoints,
-      and(
-        eq(syncCheckpoints.ownerTelegramId, telegramChats.ownerTelegramId),
-        eq(syncCheckpoints.chatPeerId, telegramChats.peerId)
-      )
-    )
-    .where(eq(telegramChats.ownerTelegramId, ownerTelegramId))
+    .leftJoin(syncTargets, eq(syncTargets.chatPeerId, telegramChats.peerId))
+    .leftJoin(syncCheckpoints, eq(syncCheckpoints.chatPeerId, telegramChats.peerId))
     .orderBy(asc(telegramChats.title));
 
   return rows.map((row) => {
-    const status = row.targetStatus ?? "pending";
+    const checkpointBackfillComplete = row.checkpointBackfillComplete ?? false;
+    const status = checkpointBackfillComplete && (!row.targetStatus || row.targetStatus === "pending")
+      ? "synced"
+      : (row.targetStatus ?? "pending");
     const selected = row.selected ?? false;
-    const isSynced = status === "synced" && (row.checkpointBackfillComplete ?? false);
+    const isSynced = status === "synced" && checkpointBackfillComplete;
     const syncedStoredCount = isSynced ? (storedCountByPeerId.get(row.peerId.toString()) ?? 0) : null;
     const rawEstimatedMessages = isSynced ? syncedStoredCount : sanitizeEstimatedMessages(row.targetEstimatedMessages);
     const shouldExposeEstimate = status === "syncing" || status === "synced" || (status === "pending" && selected);
@@ -314,37 +255,34 @@ export async function listSyncCatalogChats(ownerTelegramId: bigint): Promise<Syn
   });
 }
 
-export async function setSyncTargets(ownerTelegramId: bigint, chatPeerIds: bigint[]): Promise<void> {
+export async function setSyncTargets(_ownerTelegramId: bigint, chatPeerIds: bigint[]) {
   const now = new Date();
-
-  await db
-    .update(syncTargets)
-    .set({
-      enabled: false,
-      updatedAt: now
-    })
-    .where(eq(syncTargets.ownerTelegramId, ownerTelegramId));
+  await db.update(syncTargets).set({ enabled: false, updatedAt: now });
 
   for (const chatPeerId of chatPeerIds) {
+    const existing = await db.query.syncTargets.findFirst({ where: eq(syncTargets.chatPeerId, chatPeerId) });
+    const keepSynced = existing?.status === "synced";
+
     await db
       .insert(syncTargets)
       .values({
-        ownerTelegramId,
         chatPeerId,
         enabled: true,
-        status: "pending",
-        estimatedMessages: null,
-        estimatedEtaSeconds: null,
+        status: keepSynced ? "synced" : "pending",
+        estimatedMessages: keepSynced ? (existing?.estimatedMessages ?? null) : null,
+        estimatedEtaSeconds: keepSynced ? (existing?.estimatedEtaSeconds ?? null) : null,
+        lastSyncedAt: keepSynced ? (existing?.lastSyncedAt ?? null) : null,
         lastError: null,
         updatedAt: now
       })
       .onConflictDoUpdate({
-        target: [syncTargets.ownerTelegramId, syncTargets.chatPeerId],
+        target: syncTargets.chatPeerId,
         set: {
           enabled: true,
-          status: "pending",
-          estimatedMessages: null,
-          estimatedEtaSeconds: null,
+          status: keepSynced ? "synced" : "pending",
+          estimatedMessages: keepSynced ? (existing?.estimatedMessages ?? null) : null,
+          estimatedEtaSeconds: keepSynced ? (existing?.estimatedEtaSeconds ?? null) : null,
+          lastSyncedAt: keepSynced ? (existing?.lastSyncedAt ?? null) : null,
           lastError: null,
           updatedAt: now
         }
@@ -352,18 +290,10 @@ export async function setSyncTargets(ownerTelegramId: bigint, chatPeerIds: bigin
   }
 }
 
-export async function setTargetEstimate(
-  ownerTelegramId: bigint,
-  chatPeerId: bigint,
-  estimate: {
-    estimatedMessages: number | null;
-    estimatedEtaSeconds: number | null;
-  }
-): Promise<void> {
+export async function setTargetEstimate(_ownerTelegramId: bigint, chatPeerId: bigint, estimate: { estimatedMessages: number | null; estimatedEtaSeconds: number | null; }) {
   await db
     .insert(syncTargets)
     .values({
-      ownerTelegramId,
       chatPeerId,
       enabled: true,
       estimatedMessages: estimate.estimatedMessages,
@@ -371,7 +301,7 @@ export async function setTargetEstimate(
       updatedAt: new Date()
     })
     .onConflictDoUpdate({
-      target: [syncTargets.ownerTelegramId, syncTargets.chatPeerId],
+      target: syncTargets.chatPeerId,
       set: {
         estimatedMessages: estimate.estimatedMessages,
         estimatedEtaSeconds: estimate.estimatedEtaSeconds,
@@ -381,307 +311,118 @@ export async function setTargetEstimate(
 }
 
 export async function enqueueSyncRun(ownerTelegramId: bigint, chatPeerIds: bigint[]): Promise<SyncRunInfo> {
-  if (chatPeerIds.length === 0) {
-    throw new Error("Select at least one chat to sync");
-  }
-
+  if (chatPeerIds.length === 0) throw new Error("Select at least one chat to sync");
   const active = await getActiveSyncRun(ownerTelegramId);
-  if (active) {
-    return active;
-  }
+  if (active) return active;
 
   await setSyncTargets(ownerTelegramId, chatPeerIds);
-
-  const inserted = await db
-    .insert(syncRuns)
-    .values({
-      ownerTelegramId,
-      status: "queued",
-      chatPeerIds: encodeChatPeerIds(chatPeerIds),
-      totalChats: chatPeerIds.length,
-      completedChats: 0,
-      estimatedMessages: 0,
-      processedMessages: 0,
-      createdAt: new Date(),
-      updatedAt: new Date()
-    })
-    .returning();
+  const inserted = await db.insert(syncRuns).values({
+    status: "queued",
+    chatPeerIds: encodeChatPeerIds(chatPeerIds),
+    totalChats: chatPeerIds.length,
+    completedChats: 0,
+    estimatedMessages: 0,
+    processedMessages: 0,
+    createdAt: new Date(),
+    updatedAt: new Date()
+  }).returning();
 
   const run = inserted[0];
-
-  await appendSyncRunLog(run.id, ownerTelegramId, "Sync run queued", "info", {
-    chatCount: chatPeerIds.length
-  });
-
+  await appendSyncRunLog(run.id, ownerTelegramId, "Sync run queued", "info", { chatCount: chatPeerIds.length });
   return mapRun(run);
 }
 
-export async function getActiveSyncRun(ownerTelegramId: bigint): Promise<SyncRunInfo | null> {
+export async function getActiveSyncRun(_ownerTelegramId?: bigint) {
   const run = await db.query.syncRuns.findFirst({
-    where: and(
-      eq(syncRuns.ownerTelegramId, ownerTelegramId),
-      inArray(syncRuns.status, ["queued", "running"])
-    ),
+    where: inArray(syncRuns.status, ["queued", "running"]),
     orderBy: [desc(syncRuns.createdAt)]
   });
-
   return run ? mapRun(run) : null;
 }
 
-export async function getLatestSyncRun(ownerTelegramId: bigint): Promise<SyncRunInfo | null> {
-  const run = await db.query.syncRuns.findFirst({
-    where: eq(syncRuns.ownerTelegramId, ownerTelegramId),
-    orderBy: [desc(syncRuns.createdAt)]
-  });
-
+export async function getLatestSyncRun(_ownerTelegramId?: bigint) {
+  const run = await db.query.syncRuns.findFirst({ orderBy: [desc(syncRuns.createdAt)] });
   return run ? mapRun(run) : null;
 }
 
-export async function listSyncRunLogs(
-  ownerTelegramId: bigint,
-  runId: number,
-  limit = 80
-): Promise<SyncRunLog[]> {
-  const rows = await db.query.syncRunLogs.findMany({
-    where: and(eq(syncRunLogs.ownerTelegramId, ownerTelegramId), eq(syncRunLogs.runId, runId)),
-    orderBy: [desc(syncRunLogs.createdAt)],
-    limit
-  });
-
-  return rows
-    .map((row) => ({
-      id: row.id,
-      runId: row.runId,
-      level: row.level,
-      message: row.message,
-      meta: row.meta ?? null,
-      createdAt: row.createdAt
-    }))
-    .reverse();
+export async function listSyncRunLogs(_ownerTelegramId: bigint, runId: number, limit = 80): Promise<SyncRunLog[]> {
+  const rows = await db.query.syncRunLogs.findMany({ where: eq(syncRunLogs.runId, runId), orderBy: [desc(syncRunLogs.createdAt)], limit });
+  return rows.map((row) => ({ id: row.id, runId: row.runId, level: row.level, message: row.message, meta: row.meta ?? null, createdAt: row.createdAt })).reverse();
 }
 
 export async function getSyncStatusSnapshot(ownerTelegramId: bigint): Promise<SyncStatusSnapshot> {
-  const activeRun = sanitizeRunEstimates(await getActiveSyncRun(ownerTelegramId));
-  const latestRun = activeRun ?? sanitizeRunEstimates(await getLatestSyncRun(ownerTelegramId));
+  const activeRun = await getActiveSyncRun(ownerTelegramId);
+  const latestRun = activeRun ?? (await getLatestSyncRun(ownerTelegramId));
   const logs = latestRun ? await listSyncRunLogs(ownerTelegramId, latestRun.id, 80) : [];
-
-  return {
-    activeRun,
-    latestRun,
-    logs
-  };
+  return { activeRun, latestRun, logs };
 }
 
-export async function appendSyncRunLog(
-  runId: number,
-  ownerTelegramId: bigint,
-  message: string,
-  level: string,
-  meta: Record<string, unknown> | null = null
-): Promise<void> {
-  await db.insert(syncRunLogs).values({
-    runId,
-    ownerTelegramId,
-    level,
-    message,
-    meta,
-    createdAt: new Date()
-  });
+export async function appendSyncRunLog(runId: number, _ownerTelegramId: bigint, message: string, level: string, meta: Record<string, unknown> | null = null) {
+  await db.insert(syncRunLogs).values({ runId, level, message, meta, createdAt: new Date() });
 }
 
-export async function claimQueuedSyncRun(ownerTelegramId: bigint): Promise<SyncRunInfo | null> {
+export async function claimQueuedSyncRun(_ownerTelegramId: bigint): Promise<SyncRunInfo | null> {
   return db.transaction(async (tx) => {
-    const queued = await tx.query.syncRuns.findFirst({
-      where: and(eq(syncRuns.ownerTelegramId, ownerTelegramId), eq(syncRuns.status, "queued")),
-      orderBy: [asc(syncRuns.createdAt)]
-    });
-
-    if (!queued) {
-      return null;
-    }
-
-    const updated = await tx
-      .update(syncRuns)
-      .set({
-        status: "running",
-        startedAt: new Date(),
-        updatedAt: new Date()
-      })
-      .where(and(eq(syncRuns.id, queued.id), eq(syncRuns.status, "queued")))
-      .returning();
-
-    if (updated.length === 0) {
-      return null;
-    }
-
+    const queued = await tx.query.syncRuns.findFirst({ where: eq(syncRuns.status, "queued"), orderBy: [asc(syncRuns.createdAt)] });
+    if (!queued) return null;
+    const updated = await tx.update(syncRuns).set({ status: "running", startedAt: new Date(), updatedAt: new Date() }).where(and(eq(syncRuns.id, queued.id), eq(syncRuns.status, "queued"))).returning();
+    if (updated.length === 0) return null;
     return mapRun(updated[0]);
   });
 }
 
-export async function setRunCurrentChat(
-  runId: number,
-  ownerTelegramId: bigint,
-  chatPeerId: bigint | null
-): Promise<void> {
-  await db
-    .update(syncRuns)
-    .set({
-      currentChatPeerId: chatPeerId,
-      updatedAt: new Date()
-    })
-    .where(and(eq(syncRuns.id, runId), eq(syncRuns.ownerTelegramId, ownerTelegramId)));
+export async function setRunCurrentChat(runId: number, _ownerTelegramId: bigint, chatPeerId: bigint | null) {
+  await db.update(syncRuns).set({ currentChatPeerId: chatPeerId, updatedAt: new Date() }).where(eq(syncRuns.id, runId));
 }
 
-export async function completeSyncRun(runId: number, ownerTelegramId: bigint): Promise<void> {
-  await db
-    .update(syncRuns)
-    .set({
-      status: "completed",
-      currentChatPeerId: null,
-      finishedAt: new Date(),
-      etaSeconds: 0,
-      updatedAt: new Date()
-    })
-    .where(and(eq(syncRuns.id, runId), eq(syncRuns.ownerTelegramId, ownerTelegramId)));
+export async function completeSyncRun(runId: number, _ownerTelegramId: bigint) {
+  await db.update(syncRuns).set({ status: "completed", currentChatPeerId: null, finishedAt: new Date(), etaSeconds: 0, updatedAt: new Date() }).where(eq(syncRuns.id, runId));
 }
 
-export async function failSyncRun(
-  runId: number,
-  ownerTelegramId: bigint,
-  errorMessage: string
-): Promise<void> {
-  await db
-    .update(syncRuns)
-    .set({
-      status: "failed",
-      lastError: errorMessage,
-      finishedAt: new Date(),
-      currentChatPeerId: null,
-      updatedAt: new Date()
-    })
-    .where(and(eq(syncRuns.id, runId), eq(syncRuns.ownerTelegramId, ownerTelegramId)));
+export async function failSyncRun(runId: number, _ownerTelegramId: bigint, errorMessage: string) {
+  await db.update(syncRuns).set({ status: "failed", lastError: errorMessage, finishedAt: new Date(), currentChatPeerId: null, updatedAt: new Date() }).where(eq(syncRuns.id, runId));
 }
 
-export async function updateRunProgress(
-  runId: number,
-  ownerTelegramId: bigint,
-  payload: {
-    estimatedMessages?: number;
-    estimatedMessagesDelta?: number;
-    processedMessagesDelta?: number;
-    completedChatsDelta?: number;
-    etaSeconds?: number | null;
-  }
-): Promise<void> {
-  const updates: Partial<typeof syncRuns.$inferInsert> = {
-    updatedAt: new Date()
-  };
-
-  if (typeof payload.etaSeconds !== "undefined") {
-    updates.etaSeconds = payload.etaSeconds;
-  }
-
-  if (typeof payload.estimatedMessages === "number") {
-    updates.estimatedMessages = payload.estimatedMessages;
-  }
-
-  if (typeof payload.estimatedMessagesDelta === "number") {
-    updates.estimatedMessages = sql`${syncRuns.estimatedMessages} + ${payload.estimatedMessagesDelta}` as unknown as number;
-  }
-
-  if (typeof payload.processedMessagesDelta === "number") {
-    updates.processedMessages = sql`${syncRuns.processedMessages} + ${payload.processedMessagesDelta}` as unknown as number;
-  }
-
-  if (typeof payload.completedChatsDelta === "number") {
-    updates.completedChats = sql`${syncRuns.completedChats} + ${payload.completedChatsDelta}` as unknown as number;
-  }
-
-  await db
-    .update(syncRuns)
-    .set(updates)
-    .where(and(eq(syncRuns.id, runId), eq(syncRuns.ownerTelegramId, ownerTelegramId)));
+export async function updateRunProgress(runId: number, _ownerTelegramId: bigint, payload: { estimatedMessages?: number; estimatedMessagesDelta?: number; processedMessagesDelta?: number; completedChatsDelta?: number; etaSeconds?: number | null; }) {
+  const updates: Partial<typeof syncRuns.$inferInsert> = { updatedAt: new Date() };
+  if (typeof payload.etaSeconds !== "undefined") updates.etaSeconds = payload.etaSeconds;
+  if (typeof payload.estimatedMessages === "number") updates.estimatedMessages = payload.estimatedMessages;
+  if (typeof payload.estimatedMessagesDelta === "number") updates.estimatedMessages = sql`${syncRuns.estimatedMessages} + ${payload.estimatedMessagesDelta}` as unknown as number;
+  if (typeof payload.processedMessagesDelta === "number") updates.processedMessages = sql`${syncRuns.processedMessages} + ${payload.processedMessagesDelta}` as unknown as number;
+  if (typeof payload.completedChatsDelta === "number") updates.completedChats = sql`${syncRuns.completedChats} + ${payload.completedChatsDelta}` as unknown as number;
+  await db.update(syncRuns).set(updates).where(eq(syncRuns.id, runId));
 }
 
-export async function setTargetStatus(
-  ownerTelegramId: bigint,
-  chatPeerId: bigint,
-  status: SyncTargetStatus,
-  lastError: string | null = null
-): Promise<void> {
+export async function setTargetStatus(_ownerTelegramId: bigint, chatPeerId: bigint, status: SyncTargetStatus, lastError: string | null = null) {
   await db
     .insert(syncTargets)
-    .values({
-      ownerTelegramId,
-      chatPeerId,
-      enabled: true,
-      status,
-      lastError,
-      lastSyncedAt: status === "synced" ? new Date() : null,
-      updatedAt: new Date()
-    })
+    .values({ chatPeerId, enabled: true, status, lastError, lastSyncedAt: status === "synced" ? new Date() : null, updatedAt: new Date() })
     .onConflictDoUpdate({
-      target: [syncTargets.ownerTelegramId, syncTargets.chatPeerId],
-      set: {
-        status,
-        lastError,
-        lastSyncedAt: status === "synced" ? new Date() : syncTargets.lastSyncedAt,
-        updatedAt: new Date()
-      }
+      target: syncTargets.chatPeerId,
+      set: { status, lastError, lastSyncedAt: status === "synced" ? new Date() : syncTargets.lastSyncedAt, updatedAt: new Date() }
     });
 }
 
-export async function loadSyncCheckpoint(
-  ownerTelegramId: bigint,
-  chatPeerId: bigint
-): Promise<SyncCheckpointState> {
-  const row = await db.query.syncCheckpoints.findFirst({
-    where: and(
-      eq(syncCheckpoints.ownerTelegramId, ownerTelegramId),
-      eq(syncCheckpoints.chatPeerId, chatPeerId)
-    )
-  });
-
-  if (!row) {
-    return {
-      nextOffset: null,
-      nextMaxId: null,
-      newestMessageId: null,
-      oldestMessageId: null,
-      backfillComplete: false,
-      lastProcessedAt: null,
-      lastError: null
-    };
-  }
-
-  return {
-    nextOffset: row.nextOffset,
-    nextMaxId: row.nextMaxId,
-    newestMessageId: row.newestMessageId,
-    oldestMessageId: row.oldestMessageId,
-    backfillComplete: row.backfillComplete,
-    lastProcessedAt: row.lastProcessedAt,
-    lastError: row.lastError
-  };
+export async function loadSyncCheckpoint(_ownerTelegramId: bigint, chatPeerId: bigint): Promise<SyncCheckpointState> {
+  const row = await db.query.syncCheckpoints.findFirst({ where: eq(syncCheckpoints.chatPeerId, chatPeerId) });
+  if (!row) return { nextOffset: null, nextMaxId: null, newestMessageId: null, oldestMessageId: null, backfillComplete: false, lastProcessedAt: null, lastError: null };
+  return { nextOffset: row.nextOffset, nextMaxId: row.nextMaxId, newestMessageId: row.newestMessageId, oldestMessageId: row.oldestMessageId, backfillComplete: row.backfillComplete, lastProcessedAt: row.lastProcessedAt, lastError: row.lastError };
 }
 
-export async function saveSyncCheckpoint(
-  ownerTelegramId: bigint,
-  chatPeerId: bigint,
-  payload: {
-    nextOffset: number | null;
-    nextMaxId: number | null;
-    newestMessageId: number | null;
-    oldestMessageId: number | null;
-    backfillComplete: boolean;
-    lastError?: string | null;
-  }
-): Promise<void> {
-  await db
-    .insert(syncCheckpoints)
-    .values({
-      ownerTelegramId,
-      chatPeerId,
+export async function saveSyncCheckpoint(_ownerTelegramId: bigint, chatPeerId: bigint, payload: { nextOffset: number | null; nextMaxId: number | null; newestMessageId: number | null; oldestMessageId: number | null; backfillComplete: boolean; lastError?: string | null; }) {
+  await db.insert(syncCheckpoints).values({
+    chatPeerId,
+    nextOffset: payload.nextOffset,
+    nextMaxId: payload.nextMaxId,
+    newestMessageId: payload.newestMessageId,
+    oldestMessageId: payload.oldestMessageId,
+    backfillComplete: payload.backfillComplete,
+    lastProcessedAt: new Date(),
+    lastError: payload.lastError ?? null,
+    updatedAt: new Date()
+  }).onConflictDoUpdate({
+    target: syncCheckpoints.chatPeerId,
+    set: {
       nextOffset: payload.nextOffset,
       nextMaxId: payload.nextMaxId,
       newestMessageId: payload.newestMessageId,
@@ -690,42 +431,33 @@ export async function saveSyncCheckpoint(
       lastProcessedAt: new Date(),
       lastError: payload.lastError ?? null,
       updatedAt: new Date()
-    })
-    .onConflictDoUpdate({
-      target: [syncCheckpoints.ownerTelegramId, syncCheckpoints.chatPeerId],
-      set: {
-        nextOffset: payload.nextOffset,
-        nextMaxId: payload.nextMaxId,
-        newestMessageId: payload.newestMessageId,
-        oldestMessageId: payload.oldestMessageId,
-        backfillComplete: payload.backfillComplete,
-        lastProcessedAt: new Date(),
-        lastError: payload.lastError ?? null,
-        updatedAt: new Date()
-      }
-    });
+    }
+  });
 }
 
-export async function storeNormalizedMessages(
-  ownerTelegramId: bigint,
-  chatPeerId: bigint,
-  messages: NormalizedSyncMessage[]
-): Promise<void> {
-  if (messages.length === 0) {
-    return;
-  }
-
+export async function storeNormalizedMessages(_ownerTelegramId: bigint, chatPeerId: bigint, messages: NormalizedSyncMessage[]) {
+  if (messages.length === 0) return;
   const now = new Date();
-  const messageIds = messages.map((message) => message.messageId);
+  const messageIds = messages.map((m) => m.messageId);
 
   await db.transaction(async (tx) => {
     for (const message of messages) {
-      await tx
-        .insert(telegramMessages)
-        .values({
-          ownerTelegramId,
-          chatPeerId,
-          messageId: message.messageId,
+      await tx.insert(telegramMessages).values({
+        chatPeerId,
+        messageId: message.messageId,
+        senderPeerId: message.senderPeerId,
+        date: message.date,
+        editDate: message.editDate,
+        text: message.text,
+        isOutgoing: message.isOutgoing,
+        isService: message.isService,
+        isDeleted: message.isDeleted,
+        hasMedia: message.hasMedia,
+        raw: message.raw,
+        updatedAt: now
+      }).onConflictDoUpdate({
+        target: [telegramMessages.chatPeerId, telegramMessages.messageId],
+        set: {
           senderPeerId: message.senderPeerId,
           date: message.date,
           editDate: message.editDate,
@@ -736,57 +468,28 @@ export async function storeNormalizedMessages(
           hasMedia: message.hasMedia,
           raw: message.raw,
           updatedAt: now
-        })
-        .onConflictDoUpdate({
-          target: [
-            telegramMessages.ownerTelegramId,
-            telegramMessages.chatPeerId,
-            telegramMessages.messageId
-          ],
-          set: {
-            senderPeerId: message.senderPeerId,
-            date: message.date,
-            editDate: message.editDate,
-            text: message.text,
-            isOutgoing: message.isOutgoing,
-            isService: message.isService,
-            isDeleted: message.isDeleted,
-            hasMedia: message.hasMedia,
-            raw: message.raw,
-            updatedAt: now
-          }
-        });
+        }
+      });
     }
 
-    await tx
-      .delete(telegramMessageMedia)
-      .where(
-        and(
-          eq(telegramMessageMedia.ownerTelegramId, ownerTelegramId),
-          eq(telegramMessageMedia.chatPeerId, chatPeerId),
-          inArray(telegramMessageMedia.messageId, messageIds)
-        )
-      );
+    await tx.delete(telegramMessageMedia).where(and(eq(telegramMessageMedia.chatPeerId, chatPeerId), inArray(telegramMessageMedia.messageId, messageIds)));
 
-    const mediaRows = messages.flatMap((message) =>
-      message.media.map((media) => ({
-        ownerTelegramId,
-        chatPeerId,
-        messageId: message.messageId,
-        mediaType: media.mediaType,
-        fileId: media.fileId ?? null,
-        fileUniqueId: media.fileUniqueId ?? null,
-        mimeType: media.mimeType ?? null,
-        fileName: media.fileName ?? null,
-        durationSeconds: media.durationSeconds ?? null,
-        width: media.width ?? null,
-        height: media.height ?? null,
-        sizeBytes: media.sizeBytes ?? null,
-        raw: media.raw ?? null,
-        createdAt: now,
-        updatedAt: now
-      }))
-    );
+    const mediaRows = messages.flatMap((message) => message.media.map((media) => ({
+      chatPeerId,
+      messageId: message.messageId,
+      mediaType: media.mediaType,
+      fileId: media.fileId ?? null,
+      fileUniqueId: media.fileUniqueId ?? null,
+      mimeType: media.mimeType ?? null,
+      fileName: media.fileName ?? null,
+      durationSeconds: media.durationSeconds ?? null,
+      width: media.width ?? null,
+      height: media.height ?? null,
+      sizeBytes: media.sizeBytes ?? null,
+      raw: media.raw ?? null,
+      createdAt: now,
+      updatedAt: now
+    })));
 
     if (mediaRows.length > 0) {
       await tx.insert(telegramMessageMedia).values(mediaRows);
@@ -794,37 +497,27 @@ export async function storeNormalizedMessages(
   });
 }
 
-export async function countStoredChatMessages(ownerTelegramId: bigint, chatPeerId: bigint): Promise<number> {
-  const result = await db
-    .select({ value: sql<number>`count(*)::int` })
-    .from(telegramMessages)
-    .where(and(eq(telegramMessages.ownerTelegramId, ownerTelegramId), eq(telegramMessages.chatPeerId, chatPeerId)));
-
+export async function countStoredChatMessages(_ownerTelegramId: bigint, chatPeerId: bigint): Promise<number> {
+  const result = await db.select({ value: sql<number>`count(*)::int` }).from(telegramMessages).where(eq(telegramMessages.chatPeerId, chatPeerId));
   return result[0]?.value ?? 0;
 }
 
-export async function clearSyncData(ownerTelegramId: bigint): Promise<void> {
+export async function clearSyncData(_ownerTelegramId: bigint) {
   await db.transaction(async (tx) => {
-    await tx.delete(telegramMessageMedia).where(eq(telegramMessageMedia.ownerTelegramId, ownerTelegramId));
-    await tx.delete(telegramMessages).where(eq(telegramMessages.ownerTelegramId, ownerTelegramId));
-    await tx.delete(syncCheckpoints).where(eq(syncCheckpoints.ownerTelegramId, ownerTelegramId));
-    await tx.delete(syncRunLogs).where(eq(syncRunLogs.ownerTelegramId, ownerTelegramId));
-    await tx.delete(syncRuns).where(eq(syncRuns.ownerTelegramId, ownerTelegramId));
-    await tx.delete(syncTargets).where(eq(syncTargets.ownerTelegramId, ownerTelegramId));
-    await tx.delete(telegramChats).where(eq(telegramChats.ownerTelegramId, ownerTelegramId));
+    await tx.delete(telegramMessageMedia);
+    await tx.delete(telegramMessages);
+    await tx.delete(syncCheckpoints);
+    await tx.delete(syncRunLogs);
+    await tx.delete(syncRuns);
+    await tx.delete(syncTargets);
+    await tx.delete(telegramChats);
   });
 }
 
 export async function listRunChats(run: SyncRunInfo): Promise<SyncCatalogChat[]> {
   const ids = run.chatPeerIds;
-  if (ids.length === 0) {
-    return [];
-  }
-
-  const catalog = await listSyncCatalogChats(run.ownerTelegramId);
+  if (ids.length === 0) return [];
+  const catalog = await listSyncCatalogChats();
   const map = new Map(catalog.map((chat) => [chat.peerId.toString(), chat]));
-
-  return ids
-    .map((chatPeerId) => map.get(chatPeerId.toString()))
-    .filter((value): value is SyncCatalogChat => Boolean(value));
+  return ids.map((id) => map.get(id.toString())).filter((v): v is SyncCatalogChat => Boolean(v));
 }

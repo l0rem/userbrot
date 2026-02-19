@@ -1,16 +1,6 @@
-import { getOwnerTelegramId } from "@userbrot/core/env";
+import { getRuntimeOwnerTelegramId } from "@userbrot/core/services/setupService";
 import type { RequestEvent } from "@sveltejs/kit";
 
-export function resolveOwnerId(event: RequestEvent): bigint {
-  const fixedOwner = getOwnerTelegramId();
-  if (fixedOwner) {
-    return fixedOwner;
-  }
-
-  const userIdHeader = event.request.headers.get("x-telegram-user-id");
-  if (userIdHeader && /^\d+$/.test(userIdHeader)) {
-    return BigInt(userIdHeader);
-  }
-
-  return 1n;
+export async function resolveOwnerId(_event: RequestEvent): Promise<bigint> {
+  return getRuntimeOwnerTelegramId();
 }

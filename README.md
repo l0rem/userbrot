@@ -45,9 +45,7 @@ Copy `.env.example` to `.env` and fill values.
 | `TG_API_ID` | Yes | Telegram app API ID | [my.telegram.org/apps](https://my.telegram.org/apps) |
 | `TG_API_HASH` | Yes | Telegram app API hash | [my.telegram.org/apps](https://my.telegram.org/apps) |
 | `WEB_APP_URL` | Yes | Web app base URL | `http://localhost:3000` for local dev |
-| `OWNER_TELEGRAM_ID` | Optional | Lock setup to one Telegram user ID | Your Telegram numeric ID |
 | `SETUP_PHONE` | Optional | Prefills setup page phone input | Your phone in international format |
-| `OPENROUTER_API_KEY` | Optional | Backward-compatible key for OpenRouter | [openrouter.ai](https://openrouter.ai/) |
 | `LLM_BASE_URL` | Optional | OpenAI-compatible base URL for answers | Provider endpoint |
 | `LLM_API_KEY` | Optional | API key for `LLM_BASE_URL` | Provider dashboard |
 | `LLM_MODEL` | Optional | Chat model slug for RAG answers | Provider model list |
@@ -59,7 +57,7 @@ Notes:
 
 - Telegram Mini App buttons require HTTPS. With localhost HTTP, bot falls back to text link.
 - Never commit `.env` or session strings.
-- If `LLM_API_KEY` is unset, `OPENROUTER_API_KEY` is used as fallback for Q&A.
+- `LLM_API_KEY` is required for bot Q&A.
 
 ---
 
@@ -103,7 +101,8 @@ bun run dev:userbot
 4. If required, enter 2FA password
 5. Setup status becomes `configured`
 6. Open `http://localhost:3000/sync`, choose private chats, and start synchronization
-7. Run `bun run dev:userbot` to process queued sync jobs
+7. Open `http://localhost:3000/embeddings`, select synced chats, and queue embedding runs
+8. Run `bun run dev:userbot` to process queued sync + embedding jobs
 
 If you need to start over, click **Reset setup** on `/setup`.
 
@@ -121,6 +120,10 @@ bun run build
 bun run db:generate
 bun run db:migrate
 bun run db:studio
+
+# backup/export/import (messages + media)
+bun run --filter @userbrot/userbot backup:export-sync
+SYNC_BACKUP_DIR=data/backups/<snapshot-dir> IMPORT_CHAT_PEER_ID=479829705 bun run --filter @userbrot/userbot backup:import-chat
 ```
 
 ---
@@ -132,12 +135,13 @@ Implemented:
 - real Telegram auth (code + optional password)
 - setup state machine and persistent MTProto session storage
 - SvelteKit setup UI and API routes
-- private chat sync UI (`/sync`) with resumable run tracking and logs
-- userbot worker loop with checkpoint-based history backfill
-- minimal bot Q&A over synced messages (`/ask` or plain text)
+- private chat sync UI (`/sync`) with resumable run tracking, logs, bulk select, and bot/deleted-account filtering
+- userbot worker loop with checkpoint-based history backfill + new-message catch-up + peer cache recovery
+- embeddings operations UI (`/embeddings`) with per-chat estimates, run logs, reset selected chats, and full debug clear
+- embeddings worker loop in `dev:userbot` (single process handling both sync and embeddings queues)
+- minimal bot Q&A over synced messages (`/ask` or plain text) with thread/topic reply context preserved
 
 Planned next:
 
-- vector storage and hybrid retrieval (`pgvector` + FTS)
-- dedicated sync jobs management UI (retry/cancel/history)
+- hybrid retrieval (`pgvector` + FTS) for improved Q&A relevance
 - media enrichment pipeline (voice/document understanding)

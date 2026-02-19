@@ -5,7 +5,7 @@ import { resolveOwnerId } from "$lib/server/setupContext";
 
 export const POST: RequestHandler = async (event) => {
   try {
-    const ownerTelegramId = resolveOwnerId(event);
+    const ownerTelegramId = await resolveOwnerId(event);
     await resetSetup(ownerTelegramId);
     const status = await getSetupStatus(ownerTelegramId);
     return json(status);

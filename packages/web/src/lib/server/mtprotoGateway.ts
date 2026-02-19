@@ -67,7 +67,8 @@ export class MtcuteSetupGateway implements SetupGateway {
 
       return {
         status: "already_authorized" as const,
-        sessionString: authSessionString
+        sessionString: authSessionString,
+        ownerTelegramId: BigInt((await client.getMe()).id)
       };
     });
   }
@@ -89,9 +90,11 @@ export class MtcuteSetupGateway implements SetupGateway {
         });
 
         const sessionString = await client.exportSession();
+        const me = await client.getMe();
         return {
           success: true as const,
-          sessionString
+          sessionString,
+          ownerTelegramId: BigInt(me.id)
         };
       } catch (error) {
         if (isPasswordNeeded(error)) {
@@ -119,7 +122,8 @@ export class MtcuteSetupGateway implements SetupGateway {
       }
 
       const sessionString = await client.exportSession();
-      return { sessionString };
+      const me = await client.getMe();
+      return { sessionString, ownerTelegramId: BigInt(me.id) };
     });
   }
 }

@@ -1,7 +1,6 @@
 import { db, mtprotoSessions, requireMtprotoApiCredentials, sql } from "@userbrot/core";
-import { getOwnerTelegramId } from "@userbrot/core/env";
 import { MemoryStorage, TelegramClient } from "@mtcute/node";
-import { eq } from "drizzle-orm";
+import { desc } from "drizzle-orm";
 
 const rawChatId = process.env.SYNC_PROBE_CHAT_ID;
 if (!rawChatId || !/^\d+$/.test(rawChatId)) {
@@ -12,12 +11,9 @@ if (!rawChatId || !/^\d+$/.test(rawChatId)) {
 const parsedPages = Number.parseInt(process.env.SYNC_PROBE_PAGES ?? "3", 10);
 const maxPages = Number.isFinite(parsedPages) ? Math.min(Math.max(parsedPages, 1), 20) : 3;
 
-const ownerTelegramId = getOwnerTelegramId();
-const session = ownerTelegramId
-  ? await db.query.mtprotoSessions.findFirst({
-      where: eq(mtprotoSessions.ownerTelegramId, ownerTelegramId)
-    })
-  : await db.query.mtprotoSessions.findFirst();
+const session = await db.query.mtprotoSessions.findFirst({
+  orderBy: [desc(mtprotoSessions.updatedAt)]
+});
 
 if (!session) {
   console.error("No MTProto session found. Complete setup first.");

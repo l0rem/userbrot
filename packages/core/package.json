@@ -8,6 +8,7 @@
     "./db/schema": "./src/db/schema.ts",
     "./db/client": "./src/db/client.ts",
     "./env": "./src/env.ts",
+    "./services/embeddingsService": "./src/services/embeddingsService.ts",
     "./services/setupService": "./src/services/setupService.ts",
     "./services/syncService": "./src/services/syncService.ts",
     "./services/ragService": "./src/services/ragService.ts"

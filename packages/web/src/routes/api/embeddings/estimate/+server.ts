@@ -1,9 +1,12 @@
-import { loadSyncCheckpoint, setTargetEstimate } from "@userbrot/core/services/syncService";
+import { requireEmbeddingProviderConfig } from "@userbrot/core/env";
+import {
+  countPendingEmbeddingsForChat,
+  setEmbeddingTargetEstimate
+} from "@userbrot/core/services/embeddingsService";
 import { json } from "@sveltejs/kit";
 import { z } from "zod";
 import type { RequestHandler } from "./$types";
 import { resolveOwnerId } from "$lib/server/setupContext";
-import { estimateChatBackfill } from "$lib/server/syncGateway";
 
 const MAX_CHAT_SELECTION = 1000;
 
@@ -15,38 +18,40 @@ export const POST: RequestHandler = async (event) => {
   try {
     const ownerTelegramId = await resolveOwnerId(event);
     const payload = bodySchema.parse(await event.request.json());
+    const model = requireEmbeddingProviderConfig().model;
 
-    const results: Array<{
+    const estimates: Array<{
       peerId: string;
       estimatedMessages: number | null;
       estimatedEtaSeconds: number | null;
-      estimateMode: "exact" | "lower_bound" | "unknown";
+      estimateMode: "exact" | "unknown";
     }> = [];
 
     for (const peerId of payload.chatPeerIds) {
       const chatPeerId = BigInt(peerId);
-      try {
-        const checkpoint = await loadSyncCheckpoint(ownerTelegramId, chatPeerId);
-        const estimate = await estimateChatBackfill(ownerTelegramId, chatPeerId, checkpoint.oldestMessageId);
 
-        await setTargetEstimate(ownerTelegramId, chatPeerId, {
-          estimatedMessages: estimate.estimatedMessages,
-          estimatedEtaSeconds: estimate.estimatedEtaSeconds
+      try {
+        const estimatedMessages = await countPendingEmbeddingsForChat(ownerTelegramId, chatPeerId, model);
+        const estimatedEtaSeconds = estimatedMessages > 0 ? Math.ceil(estimatedMessages / 45) : 0;
+
+        await setEmbeddingTargetEstimate(ownerTelegramId, chatPeerId, {
+          estimatedMessages,
+          estimatedEtaSeconds
         });
 
-        results.push({
+        estimates.push({
           peerId,
-          estimatedMessages: estimate.estimatedMessages,
-          estimatedEtaSeconds: estimate.estimatedEtaSeconds,
-          estimateMode: estimate.estimateMode
+          estimatedMessages,
+          estimatedEtaSeconds,
+          estimateMode: "exact"
         });
       } catch {
-        await setTargetEstimate(ownerTelegramId, chatPeerId, {
+        await setEmbeddingTargetEstimate(ownerTelegramId, chatPeerId, {
           estimatedMessages: null,
           estimatedEtaSeconds: null
         });
 
-        results.push({
+        estimates.push({
           peerId,
           estimatedMessages: null,
           estimatedEtaSeconds: null,
@@ -55,11 +60,11 @@ export const POST: RequestHandler = async (event) => {
       }
     }
 
-    return json({ estimates: results });
+    return json({ estimates });
   } catch (error) {
     const message =
       error instanceof z.ZodError
-        ? `Select between 1 and ${MAX_CHAT_SELECTION} chats to estimate`
+        ? `Select between 1 and ${MAX_CHAT_SELECTION} chats to estimate embeddings`
         : error instanceof Error
           ? error.message
           : String(error);

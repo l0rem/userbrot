@@ -1,13 +1,45 @@
 import { answerQuestionFromSyncedChats } from "@userbrot/core/services/ragService";
-import { getEnv, getOwnerTelegramId, requireBotToken } from "@userbrot/core/env";
+import { getEnv, requireBotToken } from "@userbrot/core/env";
 import { Bot } from "gramio";
 
 const token = requireBotToken();
 const webAppUrl = getEnv().WEB_APP_URL;
-const fixedOwnerTelegramId = getOwnerTelegramId();
 const setupUrl = new URL("/setup", webAppUrl.endsWith("/") ? webAppUrl : `${webAppUrl}/`);
 const syncUrl = new URL("/sync", webAppUrl.endsWith("/") ? webAppUrl : `${webAppUrl}/`);
 const supportsTelegramWebApp = setupUrl.protocol === "https:";
+
+type ReplyThreadParams = {
+  message_thread_id?: number;
+  direct_messages_topic_id?: number;
+};
+
+function parseNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function extractThreadParams(payload: Record<string, unknown>): ReplyThreadParams {
+  const threadParams: ReplyThreadParams = {};
+
+  const threadId = parseNumber(payload.message_thread_id);
+  if (threadId !== null) {
+    threadParams.message_thread_id = threadId;
+  }
+
+  const directTopicId = parseNumber(payload.direct_messages_topic_id);
+  if (directTopicId !== null) {
+    threadParams.direct_messages_topic_id = directTopicId;
+  }
+
+  const directTopic = payload.direct_messages_topic;
+  if (typeof directTopic === "object" && directTopic !== null) {
+    const topicId = parseNumber((directTopic as { topic_id?: unknown }).topic_id);
+    if (topicId !== null) {
+      threadParams.direct_messages_topic_id = topicId;
+    }
+  }
+
+  return threadParams;
+}
 
 if (!supportsTelegramWebApp) {
   console.warn(
@@ -62,27 +94,10 @@ const bot = new Bot(token)
       return;
     }
 
-    const fromId = context.from?.id;
-    if (fixedOwnerTelegramId && (!fromId || BigInt(fromId) !== fixedOwnerTelegramId)) {
-      return;
-    }
-
-    const threadParams: {
-      message_thread_id?: number;
-      direct_messages_topic_id?: number;
-    } = {};
-
-    if (typeof context.payload.message_thread_id === "number") {
-      threadParams.message_thread_id = context.payload.message_thread_id;
-    }
-
-    if (typeof context.payload.direct_messages_topic?.topic_id === "number") {
-      threadParams.direct_messages_topic_id = context.payload.direct_messages_topic.topic_id;
-    }
+    const threadParams = extractThreadParams(context.payload as unknown as Record<string, unknown>);
 
     try {
-      const owner = fixedOwnerTelegramId ?? (fromId ? BigInt(fromId) : 1n);
-      const result = await answerQuestionFromSyncedChats(owner, question);
+      const result = await answerQuestionFromSyncedChats(question);
 
       const citationLine =
         result.citations.length > 0
@@ -104,27 +119,10 @@ const bot = new Bot(token)
       return;
     }
 
-    const fromId = context.from?.id;
-    if (fixedOwnerTelegramId && (!fromId || BigInt(fromId) !== fixedOwnerTelegramId)) {
-      return;
-    }
-
-    const owner = fixedOwnerTelegramId ?? (fromId ? BigInt(fromId) : 1n);
-    const threadParams: {
-      message_thread_id?: number;
-      direct_messages_topic_id?: number;
-    } = {};
-
-    if (typeof context.payload.message_thread_id === "number") {
-      threadParams.message_thread_id = context.payload.message_thread_id;
-    }
-
-    if (typeof context.payload.direct_messages_topic?.topic_id === "number") {
-      threadParams.direct_messages_topic_id = context.payload.direct_messages_topic.topic_id;
-    }
+    const threadParams = extractThreadParams(context.payload as unknown as Record<string, unknown>);
 
     try {
-      const result = await answerQuestionFromSyncedChats(owner, text);
+      const result = await answerQuestionFromSyncedChats(text);
 
       const citationLine =
         result.citations.length > 0

@@ -11,11 +11,6 @@ const envSchema = z.object({
   TG_API_HASH: z.string().min(1).optional(),
   SETUP_PHONE: z.string().trim().min(7).max(32).optional(),
   WEB_APP_URL: z.string().url().default("http://localhost:3000"),
-  OWNER_TELEGRAM_ID: z
-    .string()
-    .regex(/^\d+$/)
-    .optional(),
-  OPENROUTER_API_KEY: z.string().optional(),
   LLM_BASE_URL: z.string().url().optional(),
   LLM_API_KEY: z.string().optional(),
   LLM_MODEL: z.string().min(1).optional(),
@@ -78,14 +73,6 @@ export function getEnv(): Env {
   return cachedEnv;
 }
 
-export function getOwnerTelegramId(): bigint | null {
-  const env = getEnv();
-  if (!env.OWNER_TELEGRAM_ID) {
-    return null;
-  }
-  return BigInt(env.OWNER_TELEGRAM_ID);
-}
-
 export function requireBotToken(): string {
   const token = getEnv().BOT_TOKEN;
   if (!token) {
@@ -115,14 +102,13 @@ export type LlmProviderConfig = {
 export function requireLlmProviderConfig(): LlmProviderConfig {
   const env = getEnv();
 
-  const apiKey = env.LLM_API_KEY ?? env.OPENROUTER_API_KEY;
-  if (!apiKey) {
-    throw new Error("LLM_API_KEY or OPENROUTER_API_KEY must be set in environment");
+  if (!env.LLM_API_KEY) {
+    throw new Error("LLM_API_KEY must be set in environment");
   }
 
   return {
     baseUrl: env.LLM_BASE_URL ?? "https://openrouter.ai/api/v1",
-    apiKey,
+    apiKey: env.LLM_API_KEY,
     model: env.LLM_MODEL ?? "openai/gpt-4o-mini"
   };
 }

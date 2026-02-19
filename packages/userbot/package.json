@@ -7,7 +7,11 @@
     "dev": "bun run src/index.ts",
     "debug:probe-history": "bun run src/debug/probe-history.ts",
     "debug:estimate-chat": "bun run src/debug/estimate-chat.ts",
+    "debug:probe-embeddings": "bun run src/debug/probe-embeddings.ts",
+    "debug:verify-embeddings": "bun run src/debug/verify-embeddings.ts",
     "debug:verify-sync": "bun run src/debug/verify-sync.ts",
+    "backup:export-sync": "bun run src/debug/export-sync-backup.ts",
+    "backup:import-chat": "bun run src/debug/import-chat-backup.ts",
     "check": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {

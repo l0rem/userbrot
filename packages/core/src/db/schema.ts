@@ -1,6 +1,7 @@
 import {
   bigint,
   boolean,
+  customType,
   integer,
   index,
   jsonb,
@@ -37,7 +38,6 @@ export const setupState = pgTable(
   "setup_state",
   {
     id: serial("id").primaryKey(),
-    ownerTelegramId: bigint("owner_telegram_id", { mode: "bigint" }).notNull(),
     status: setupStatusEnum("status").default("not_configured").notNull(),
     phone: text("phone"),
     phoneCodeHash: text("phone_code_hash"),
@@ -45,7 +45,7 @@ export const setupState = pgTable(
     requiresPassword: boolean("requires_password").default(false).notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull()
   },
-  (table) => [uniqueIndex("setup_state_owner_telegram_id_uq").on(table.ownerTelegramId)]
+  () => []
 );
 
 export const mtprotoSessions = pgTable(
@@ -78,11 +78,54 @@ export const syncRunStatusEnum = pgEnum("sync_run_status", [
   "cancelled"
 ]);
 
+export const embeddingTargetStatusEnum = pgEnum("embedding_target_status", [
+  "pending",
+  "embedding",
+  "embedded",
+  "error"
+]);
+
+export const embeddingRunStatusEnum = pgEnum("embedding_run_status", [
+  "queued",
+  "running",
+  "completed",
+  "failed",
+  "cancelled"
+]);
+
+const vector = customType<{ data: number[]; driverData: string }>({
+  dataType() {
+    return "vector";
+  },
+  toDriver(value) {
+    return `[${value.join(",")}]`;
+  },
+  fromDriver(value) {
+    if (typeof value !== "string") {
+      return [];
+    }
+
+    const trimmed = value.trim();
+    if (!trimmed.startsWith("[") || !trimmed.endsWith("]")) {
+      return [];
+    }
+
+    const raw = trimmed.slice(1, -1).trim();
+    if (raw.length === 0) {
+      return [];
+    }
+
+    return raw
+      .split(",")
+      .map((part) => Number.parseFloat(part.trim()))
+      .filter((item) => Number.isFinite(item));
+  }
+});
+
 export const telegramChats = pgTable(
   "telegram_chats",
   {
     id: serial("id").primaryKey(),
-    ownerTelegramId: bigint("owner_telegram_id", { mode: "bigint" }).notNull(),
     peerId: bigint("peer_id", { mode: "bigint" }).notNull(),
     peerType: text("peer_type").default("user").notNull(),
     title: text("title").notNull(),
@@ -95,9 +138,8 @@ export const telegramChats = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull()
   },
   (table) => [
-    uniqueIndex("telegram_chats_owner_peer_uq").on(table.ownerTelegramId, table.peerId),
-    index("telegram_chats_owner_idx").on(table.ownerTelegramId),
-    index("telegram_chats_owner_title_idx").on(table.ownerTelegramId, table.title)
+    uniqueIndex("telegram_chats_peer_uq").on(table.peerId),
+    index("telegram_chats_title_idx").on(table.title)
   ]
 );
 
@@ -105,7 +147,6 @@ export const syncTargets = pgTable(
   "sync_targets",
   {
     id: serial("id").primaryKey(),
-    ownerTelegramId: bigint("owner_telegram_id", { mode: "bigint" }).notNull(),
     chatPeerId: bigint("chat_peer_id", { mode: "bigint" }).notNull(),
     enabled: boolean("enabled").default(true).notNull(),
     status: syncTargetStatusEnum("status").default("pending").notNull(),
@@ -117,8 +158,8 @@ export const syncTargets = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull()
   },
   (table) => [
-    uniqueIndex("sync_targets_owner_chat_uq").on(table.ownerTelegramId, table.chatPeerId),
-    index("sync_targets_owner_status_idx").on(table.ownerTelegramId, table.status)
+    uniqueIndex("sync_targets_chat_uq").on(table.chatPeerId),
+    index("sync_targets_status_idx").on(table.status)
   ]
 );
 
@@ -126,7 +167,6 @@ export const syncRuns = pgTable(
   "sync_runs",
   {
     id: serial("id").primaryKey(),
-    ownerTelegramId: bigint("owner_telegram_id", { mode: "bigint" }).notNull(),
     status: syncRunStatusEnum("status").default("queued").notNull(),
     chatPeerIds: jsonb("chat_peer_ids").$type<string[]>().default([]).notNull(),
     totalChats: integer("total_chats").default(0).notNull(),
@@ -142,8 +182,8 @@ export const syncRuns = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull()
   },
   (table) => [
-    index("sync_runs_owner_status_idx").on(table.ownerTelegramId, table.status),
-    index("sync_runs_owner_created_at_idx").on(table.ownerTelegramId, table.createdAt)
+    index("sync_runs_status_idx").on(table.status),
+    index("sync_runs_created_at_idx").on(table.createdAt)
   ]
 );
 
@@ -152,7 +192,6 @@ export const syncRunLogs = pgTable(
   {
     id: serial("id").primaryKey(),
     runId: integer("run_id").notNull(),
-    ownerTelegramId: bigint("owner_telegram_id", { mode: "bigint" }).notNull(),
     level: text("level").default("info").notNull(),
     message: text("message").notNull(),
     meta: jsonb("meta").$type<Record<string, unknown> | null>(),
@@ -160,7 +199,7 @@ export const syncRunLogs = pgTable(
   },
   (table) => [
     index("sync_run_logs_run_id_idx").on(table.runId),
-    index("sync_run_logs_owner_created_at_idx").on(table.ownerTelegramId, table.createdAt)
+    index("sync_run_logs_created_at_idx").on(table.createdAt)
   ]
 );
 
@@ -168,7 +207,6 @@ export const syncCheckpoints = pgTable(
   "sync_checkpoints",
   {
     id: serial("id").primaryKey(),
-    ownerTelegramId: bigint("owner_telegram_id", { mode: "bigint" }).notNull(),
     chatPeerId: bigint("chat_peer_id", { mode: "bigint" }).notNull(),
     nextMaxId: integer("next_max_id"),
     nextOffset: integer("next_offset"),
@@ -180,8 +218,7 @@ export const syncCheckpoints = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull()
   },
   (table) => [
-    uniqueIndex("sync_checkpoints_owner_chat_uq").on(table.ownerTelegramId, table.chatPeerId),
-    index("sync_checkpoints_owner_idx").on(table.ownerTelegramId)
+    uniqueIndex("sync_checkpoints_chat_uq").on(table.chatPeerId)
   ]
 );
 
@@ -189,7 +226,6 @@ export const telegramMessages = pgTable(
   "telegram_messages",
   {
     id: serial("id").primaryKey(),
-    ownerTelegramId: bigint("owner_telegram_id", { mode: "bigint" }).notNull(),
     chatPeerId: bigint("chat_peer_id", { mode: "bigint" }).notNull(),
     messageId: integer("message_id").notNull(),
     senderPeerId: bigint("sender_peer_id", { mode: "bigint" }),
@@ -206,16 +242,11 @@ export const telegramMessages = pgTable(
   },
   (table) => [
     uniqueIndex("telegram_messages_owner_chat_message_uq").on(
-      table.ownerTelegramId,
       table.chatPeerId,
       table.messageId
     ),
-    index("telegram_messages_owner_chat_date_idx").on(
-      table.ownerTelegramId,
-      table.chatPeerId,
-      table.date
-    ),
-    index("telegram_messages_owner_date_idx").on(table.ownerTelegramId, table.date)
+    index("telegram_messages_chat_date_idx").on(table.chatPeerId, table.date),
+    index("telegram_messages_date_idx").on(table.date)
   ]
 );
 
@@ -223,7 +254,6 @@ export const telegramMessageMedia = pgTable(
   "telegram_message_media",
   {
     id: serial("id").primaryKey(),
-    ownerTelegramId: bigint("owner_telegram_id", { mode: "bigint" }).notNull(),
     chatPeerId: bigint("chat_peer_id", { mode: "bigint" }).notNull(),
     messageId: integer("message_id").notNull(),
     mediaType: text("media_type").notNull(),
@@ -241,14 +271,116 @@ export const telegramMessageMedia = pgTable(
   },
   (table) => [
     index("telegram_message_media_owner_chat_message_idx").on(
-      table.ownerTelegramId,
       table.chatPeerId,
       table.messageId
     ),
-    index("telegram_message_media_owner_media_type_idx").on(table.ownerTelegramId, table.mediaType)
+    index("telegram_message_media_media_type_idx").on(table.mediaType)
+  ]
+);
+
+export const embeddingTargets = pgTable(
+  "embedding_targets",
+  {
+    id: serial("id").primaryKey(),
+    chatPeerId: bigint("chat_peer_id", { mode: "bigint" }).notNull(),
+    enabled: boolean("enabled").default(true).notNull(),
+    status: embeddingTargetStatusEnum("status").default("pending").notNull(),
+    estimatedMessages: integer("estimated_messages"),
+    estimatedEtaSeconds: integer("estimated_eta_seconds"),
+    lastEmbeddedAt: timestamp("last_embedded_at", { withTimezone: true }),
+    lastError: text("last_error"),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull()
+  },
+  (table) => [
+    uniqueIndex("embedding_targets_chat_uq").on(table.chatPeerId),
+    index("embedding_targets_status_idx").on(table.status)
+  ]
+);
+
+export const embeddingRuns = pgTable(
+  "embedding_runs",
+  {
+    id: serial("id").primaryKey(),
+    status: embeddingRunStatusEnum("status").default("queued").notNull(),
+    model: text("model").notNull(),
+    chatPeerIds: jsonb("chat_peer_ids").$type<string[]>().default([]).notNull(),
+    totalChats: integer("total_chats").default(0).notNull(),
+    completedChats: integer("completed_chats").default(0).notNull(),
+    estimatedMessages: integer("estimated_messages").default(0).notNull(),
+    processedMessages: integer("processed_messages").default(0).notNull(),
+    etaSeconds: integer("eta_seconds"),
+    currentChatPeerId: bigint("current_chat_peer_id", { mode: "bigint" }),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+    lastError: text("last_error"),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull()
+  },
+  (table) => [
+    index("embedding_runs_status_idx").on(table.status),
+    index("embedding_runs_created_at_idx").on(table.createdAt)
+  ]
+);
+
+export const embeddingRunLogs = pgTable(
+  "embedding_run_logs",
+  {
+    id: serial("id").primaryKey(),
+    runId: integer("run_id").notNull(),
+    level: text("level").default("info").notNull(),
+    message: text("message").notNull(),
+    meta: jsonb("meta").$type<Record<string, unknown> | null>(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull()
+  },
+  (table) => [
+    index("embedding_run_logs_run_id_idx").on(table.runId),
+    index("embedding_run_logs_created_at_idx").on(table.createdAt)
+  ]
+);
+
+export const embeddingCheckpoints = pgTable(
+  "embedding_checkpoints",
+  {
+    id: serial("id").primaryKey(),
+    chatPeerId: bigint("chat_peer_id", { mode: "bigint" }).notNull(),
+    nextMessageId: integer("next_message_id"),
+    backfillComplete: boolean("backfill_complete").default(false).notNull(),
+    lastProcessedAt: timestamp("last_processed_at", { withTimezone: true }),
+    lastError: text("last_error"),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull()
+  },
+  (table) => [
+    uniqueIndex("embedding_checkpoints_chat_uq").on(table.chatPeerId)
+  ]
+);
+
+export const telegramMessageEmbeddings = pgTable(
+  "telegram_message_embeddings",
+  {
+    id: serial("id").primaryKey(),
+    chatPeerId: bigint("chat_peer_id", { mode: "bigint" }).notNull(),
+    messageId: integer("message_id").notNull(),
+    model: text("model").notNull(),
+    dimensions: integer("dimensions").notNull(),
+    embedding: vector("embedding").notNull(),
+    sourceUpdatedAt: timestamp("source_updated_at", { withTimezone: true }).notNull(),
+    sourceText: text("source_text"),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull()
+  },
+  (table) => [
+    uniqueIndex("telegram_message_embeddings_owner_chat_message_uq").on(
+      table.chatPeerId,
+      table.messageId
+    ),
+    index("telegram_message_embeddings_chat_idx").on(table.chatPeerId),
+    index("telegram_message_embeddings_model_idx").on(table.model)
   ]
 );
 
 export type SetupStatus = (typeof setupStatusEnum.enumValues)[number];
 export type SyncTargetStatus = (typeof syncTargetStatusEnum.enumValues)[number];
 export type SyncRunStatus = (typeof syncRunStatusEnum.enumValues)[number];
+export type EmbeddingTargetStatus = (typeof embeddingTargetStatusEnum.enumValues)[number];
+export type EmbeddingRunStatus = (typeof embeddingRunStatusEnum.enumValues)[number];

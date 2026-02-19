@@ -11,25 +11,25 @@
     peerId: string;
     title: string;
     username: string | null;
-    isBot: boolean;
     isPinned: boolean;
     avatarUrl: string | null;
     folderIds: number[];
     lastMessageId: number | null;
     lastMessageDate: string | null;
     selected: boolean;
-    status: "pending" | "syncing" | "synced" | "error";
-    isSynced: boolean;
-    estimatedMode: "exact" | "lower_bound" | "unknown";
+    status: "pending" | "embedding" | "embedded" | "error";
+    isEmbedded: boolean;
+    estimatedMode: "exact" | "unknown";
     estimatedMessages: number | null;
     estimatedEtaSeconds: number | null;
-    lastSyncedAt: string | null;
+    lastEmbeddedAt: string | null;
     lastError: string | null;
   };
 
   type Run = {
     id: number;
     status: "queued" | "running" | "completed" | "failed" | "cancelled";
+    model: string;
     totalChats: number;
     completedChats: number;
     estimatedMessages: number;
@@ -48,6 +48,7 @@
     createdAt: string;
   };
 
+  let model = "";
   let folders: Folder[] = [];
   let chats: Chat[] = [];
   let activeFolderId = 0;
@@ -59,14 +60,15 @@
   let busyCatalog = false;
   let busyEstimate = false;
   let busyStart = false;
+  let busyReset = false;
   let busyDebugClear = false;
   let uiError = "";
   let pollTimer: ReturnType<typeof setInterval> | null = null;
 
   const statusLabel: Record<Chat["status"], string> = {
-    pending: "Unsynced",
-    syncing: "Syncing",
-    synced: "✓ Synced",
+    pending: "Pending",
+    embedding: "Embedding",
+    embedded: "✓ Embedded",
     error: "Error"
   };
 
@@ -114,15 +116,7 @@
       return null;
     }
 
-    return chat.estimatedMode === "lower_bound" ? `${chat.estimatedMessages}+ msgs` : `${chat.estimatedMessages} msgs`;
-  }
-
-  function shouldShowChatEta(chat: Chat): boolean {
-    if (chat.status === "synced") {
-      return false;
-    }
-
-    return chat.estimatedMode === "exact" && chat.estimatedEtaSeconds !== null;
+    return `${chat.estimatedMessages} msgs`;
   }
 
   function applySelectionFromChats(items: Chat[]) {
@@ -152,7 +146,8 @@
     uiError = "";
 
     try {
-      const payload = await request<{ folders: Folder[]; chats: Chat[] }>("/api/sync/catalog");
+      const payload = await request<{ model: string; folders: Folder[]; chats: Chat[] }>("/api/embeddings/catalog");
+      model = payload.model;
       folders = payload.folders;
       chats = payload.chats;
       hiddenAvatarPeerIds = new Set();
@@ -171,12 +166,14 @@
   async function loadStatus() {
     try {
       const payload = await request<{
+        model: string;
         activeRun: Run | null;
         latestRun: Run | null;
         logs: RunLog[];
         chats: Chat[];
-      }>("/api/sync/status");
+      }>("/api/embeddings/status");
 
+      model = payload.model;
       activeRun = payload.activeRun;
       latestRun = payload.latestRun;
       logs = payload.logs;
@@ -233,21 +230,11 @@
         throw new Error("Select at least one chat before estimating");
       }
 
-      await request<{
-        estimates: Array<{
-          peerId: string;
-          estimatedMessages: number | null;
-          estimatedEtaSeconds: number | null;
-          estimateMode: "exact" | "lower_bound" | "unknown";
-        }>;
-      }>(
-        "/api/sync/estimate",
-        {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ chatPeerIds: selected })
-        }
-      );
+      await request<{ estimates: Array<{ peerId: string }> }>("/api/embeddings/estimate", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ chatPeerIds: selected })
+      });
 
       await loadStatus();
     } catch (error) {
@@ -257,17 +244,17 @@
     }
   }
 
-  async function startSync() {
+  async function startEmbeddings() {
     busyStart = true;
     uiError = "";
 
     try {
       const selected = Array.from(selectedPeerIds);
       if (selected.length === 0) {
-        throw new Error("Select at least one chat to start sync");
+        throw new Error("Select at least one chat to start embeddings");
       }
 
-      await request<{ run: Run }>("/api/sync/start", {
+      await request<{ run: Run }>("/api/embeddings/start", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ chatPeerIds: selected })
@@ -281,8 +268,37 @@
     }
   }
 
-  async function clearSyncDataDebug() {
-    if (!window.confirm("This will delete all synced messages and sync metadata. MTProto session data will be kept. Continue?")) {
+  async function resetSelected() {
+    const selected = Array.from(selectedPeerIds);
+    if (selected.length === 0) {
+      uiError = "Select at least one chat to reset embeddings";
+      return;
+    }
+
+    if (!window.confirm(`Reset embeddings for ${selected.length} selected chat(s)?`)) {
+      return;
+    }
+
+    busyReset = true;
+    uiError = "";
+
+    try {
+      await request<{ ok: true }>("/api/embeddings/reset", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ chatPeerIds: selected })
+      });
+
+      await loadStatus();
+    } catch (error) {
+      uiError = error instanceof Error ? error.message : String(error);
+    } finally {
+      busyReset = false;
+    }
+  }
+
+  async function clearEmbeddingsDataDebug() {
+    if (!window.confirm("This will delete all embeddings data (vectors, runs, logs, checkpoints). Continue?")) {
       return;
     }
 
@@ -290,14 +306,13 @@
     uiError = "";
 
     try {
-      await request<{ ok: true }>("/api/sync/debug/clear", {
+      await request<{ ok: true }>("/api/embeddings/debug/clear", {
         method: "POST"
       });
 
       activeRun = null;
       latestRun = null;
       logs = [];
-      selectedPeerIds = new Set();
       await loadCatalog();
       await loadStatus();
     } catch (error) {
@@ -384,14 +399,16 @@
   <section class="card">
     <header class="card-head">
       <div>
-        <h1>Chat Sync</h1>
-        <p>Select private chats to sync historical messages. Sync is resumable and safe to restart.</p>
+        <h1>Embeddings</h1>
+        <p>Generate per-message vectors for synced chats. This powers better retrieval quality for answers.</p>
       </div>
       <div class="head-links">
-        <a class="setup-link" href="/embeddings">Open embeddings</a>
+        <a class="setup-link" href="/sync">Open sync</a>
         <a class="setup-link" href="/setup">Back to setup</a>
       </div>
     </header>
+
+    <p class="model-line">Model: <code>{model || "(loading...)"}</code></p>
 
     {#if uiError}
       <p class="error">{uiError}</p>
@@ -400,8 +417,8 @@
     <section class="run-panel">
       <div class="run-head">
         <h2>Run status</h2>
-        <button type="button" class="danger" on:click={clearSyncDataDebug} disabled={busyDebugClear}>
-          {busyDebugClear ? "Clearing..." : "Debug: clear sync data"}
+        <button type="button" class="danger" on:click={clearEmbeddingsDataDebug} disabled={busyDebugClear}>
+          {busyDebugClear ? "Clearing..." : "Debug: clear embeddings"}
         </button>
       </div>
       {#if activeRun}
@@ -412,7 +429,7 @@
           {/if}
         </p>
         {#if activeRun.status === "queued"}
-          <p class="hint">Run is queued. Start the worker with <code>bun run dev:userbot</code> to begin processing.</p>
+          <p class="hint">Run is queued. Start the worker with <code>bun run dev:userbot</code>.</p>
         {/if}
         <div class="progress-wrap" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow={progress}>
           <div class="progress" style={`width: ${progress}%`}></div>
@@ -428,7 +445,7 @@
           {/if}
         </p>
       {:else}
-        <p>No sync runs yet.</p>
+        <p>No embedding runs yet.</p>
       {/if}
 
       {#if logs.length > 0}
@@ -436,7 +453,7 @@
           {#each logs as log (log.id)}
             <p>
               <span class={`log-level ${log.level}`}>{log.level}</span>
-              <span>{new Date(log.createdAt).toLocaleTimeString()} — {compactText(log.message)}</span>
+              <span>{new Date(log.createdAt).toLocaleTimeString()} - {compactText(log.message)}</span>
             </p>
           {/each}
         </div>
@@ -446,7 +463,7 @@
     <section class="chats">
       <div class="chats-head">
         <div class="chats-head-main">
-          <h2>Private chats</h2>
+          <h2>Synced chats</h2>
           <p class="selection-meta">Selected {selectedVisibleCount}/{visibleChats.length} shown</p>
         </div>
         <div class="actions">
@@ -458,13 +475,16 @@
             {allVisibleSelected ? "Deselect all shown" : "Select all shown"}
           </button>
           <button type="button" on:click={estimateSelected} disabled={busyEstimate || selectedPeerIds.size === 0}>Estimate selected</button>
-          <button type="button" class="primary" on:click={startSync} disabled={busyStart || selectedPeerIds.size === 0}>Start synchronizing</button>
+          <button type="button" on:click={resetSelected} disabled={busyReset || selectedPeerIds.size === 0}>
+            {busyReset ? "Resetting..." : "Reset selected"}
+          </button>
+          <button type="button" class="primary" on:click={startEmbeddings} disabled={busyStart || selectedPeerIds.size === 0}>Start embeddings</button>
         </div>
       </div>
 
       <div class="folder-tabs" role="tablist" aria-label="Chat folders">
         {#if busyCatalog}
-          <p>Loading folders…</p>
+          <p>Loading folders...</p>
         {:else}
           {#each folders as folder}
             <button
@@ -483,7 +503,7 @@
       </div>
 
       {#if visibleChats.length === 0}
-        <p>No private chats found in this folder.</p>
+        <p>No synced chats found in this folder. Sync chats first on <a href="/sync">/sync</a>.</p>
       {:else}
         <ul>
           {#each visibleChats as chat (chat.peerId)}
@@ -510,15 +530,15 @@
                   </span>
                 </span>
               </label>
-                <div class="chat-meta">
-                  {#if chat.isPinned}
-                    <span class="pin" title="Pinned in Telegram">📌</span>
-                  {/if}
-                  <span class={`status ${chat.status}`}>{statusLabel[chat.status]}</span>
-                  {#if formatChatEstimate(chat)}
-                    <span>{formatChatEstimate(chat)}</span>
-                  {/if}
-                {#if shouldShowChatEta(chat)}
+              <div class="chat-meta">
+                {#if chat.isPinned}
+                  <span class="pin" title="Pinned in Telegram">📌</span>
+                {/if}
+                <span class={`status ${chat.status}`}>{statusLabel[chat.status]}</span>
+                {#if formatChatEstimate(chat)}
+                  <span>{formatChatEstimate(chat)}</span>
+                {/if}
+                {#if chat.estimatedEtaSeconds !== null && chat.status !== "embedded"}
                   <span>ETA {formatSeconds(chat.estimatedEtaSeconds)}</span>
                 {/if}
               </div>
@@ -534,8 +554,8 @@
   :global(body) {
     margin: 0;
     font-family: ui-sans-serif, -apple-system, sans-serif;
-    background: linear-gradient(180deg, #edf2fb, #f8faff);
-    color: #17243f;
+    background: linear-gradient(180deg, #f4f8f0, #f9fcf6);
+    color: #152a1d;
   }
 
   .shell {
@@ -546,11 +566,11 @@
   .card {
     width: min(1120px, 100%);
     margin: 0 auto;
-    border: 1px solid #d8e0f2;
+    border: 1px solid #d8e7d4;
     border-radius: 20px;
     background: #fff;
     padding: 22px;
-    box-shadow: 0 12px 28px rgba(21, 40, 79, 0.08);
+    box-shadow: 0 12px 28px rgba(22, 57, 29, 0.08);
   }
 
   .card-head {
@@ -558,7 +578,7 @@
     justify-content: space-between;
     gap: 14px;
     align-items: flex-start;
-    margin-bottom: 14px;
+    margin-bottom: 8px;
   }
 
   h1,
@@ -570,16 +590,22 @@
     margin: 8px 0 0;
   }
 
-  .setup-link {
-    align-self: center;
-    text-decoration: none;
-    color: #225bc7;
-    font-weight: 600;
-  }
-
   .head-links {
     display: flex;
     gap: 8px;
+  }
+
+  .setup-link {
+    align-self: center;
+    text-decoration: none;
+    color: #237646;
+    font-weight: 600;
+  }
+
+  .model-line {
+    margin: 0 0 14px;
+    color: #335244;
+    font-size: 0.95rem;
   }
 
   .error {
@@ -591,10 +617,10 @@
   }
 
   .run-panel {
-    border: 1px solid #dae4f5;
+    border: 1px solid #d9e9d8;
     border-radius: 14px;
     padding: 14px;
-    background: #f8fbff;
+    background: #f8fcf7;
   }
 
   .run-head {
@@ -619,23 +645,23 @@
     width: 100%;
     height: 12px;
     border-radius: 999px;
-    background: #d8e2f6;
+    background: #d8ead9;
     overflow: hidden;
   }
 
   .progress {
     height: 100%;
-    background: linear-gradient(90deg, #2f7fd9, #2ab39a);
+    background: linear-gradient(90deg, #36965b, #6aa51d);
   }
 
   .run-meta {
     margin: 8px 0 0;
-    color: #2f466f;
+    color: #325c41;
   }
 
   .hint {
     margin: 8px 0;
-    color: #385a8d;
+    color: #2f6243;
     font-size: 0.92rem;
   }
 
@@ -643,7 +669,7 @@
     margin-top: 12px;
     max-height: 180px;
     overflow: auto;
-    border: 1px solid #d8e0ef;
+    border: 1px solid #d9e6d7;
     border-radius: 10px;
     padding: 10px;
     background: #fff;
@@ -680,11 +706,11 @@
   }
 
   .log-level.info {
-    color: #2a4f96;
+    color: #2d7d49;
   }
 
   .chats {
-    border: 1px solid #d8e0ef;
+    border: 1px solid #d8e6d6;
     border-radius: 14px;
     padding: 12px;
     margin-top: 16px;
@@ -718,11 +744,11 @@
   .selection-meta {
     margin: 4px 0 0;
     font-size: 0.82rem;
-    color: #5d7094;
+    color: #517562;
   }
 
   .folder-tabs button {
-    border: 1px solid #d3dcf0;
+    border: 1px solid #cfdecb;
     border-radius: 999px;
     background: #fff;
     padding: 7px 12px;
@@ -733,9 +759,9 @@
   }
 
   .folder-tabs button.active {
-    border-color: #2d6fd0;
-    background: #edf3ff;
-    color: #1d4fa0;
+    border-color: #3d8f4f;
+    background: #eef9ed;
+    color: #2e6f3c;
   }
 
   .actions {
@@ -744,7 +770,7 @@
   }
 
   .actions button {
-    border: 1px solid #d0d8e8;
+    border: 1px solid #cbdcc8;
     border-radius: 10px;
     padding: 8px 12px;
     background: #fff;
@@ -752,9 +778,9 @@
   }
 
   .actions button.primary {
-    background: #1b67d4;
+    background: #2b8a46;
     color: #fff;
-    border-color: #1b67d4;
+    border-color: #2b8a46;
   }
 
   button:disabled {
@@ -769,7 +795,7 @@
   }
 
   li {
-    border-top: 1px solid #ebeff8;
+    border-top: 1px solid #ebf3e8;
     padding: 10px 0;
     display: flex;
     justify-content: space-between;
@@ -798,12 +824,12 @@
     height: 32px;
     border-radius: 999px;
     overflow: hidden;
-    border: 1px solid #d0d9eb;
+    border: 1px solid #c9dcc4;
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    background: linear-gradient(180deg, #f2f6ff, #e8eefc);
-    color: #2a4b82;
+    background: linear-gradient(180deg, #f2fbef, #e8f4e4);
+    color: #2f6f3c;
     font-size: 0.76rem;
     font-weight: 700;
   }
@@ -821,14 +847,14 @@
   }
 
   .chat-id {
-    color: #8393b2;
+    color: #7e9a85;
     font-weight: 500;
     font-size: 0.85rem;
   }
 
   .chat-username {
     display: block;
-    color: #58709a;
+    color: #5a7f67;
     font-size: 0.82rem;
   }
 
@@ -847,20 +873,20 @@
   }
 
   .status.pending {
-    background: #f1f4fb;
-    border-color: #d6deef;
-    color: #394f75;
+    background: #f2f7f2;
+    border-color: #d7e5d6;
+    color: #3c5c42;
   }
 
-  .status.syncing {
-    background: #edf6ff;
-    border-color: #cfe2ff;
-    color: #1d61bc;
+  .status.embedding {
+    background: #edf9ef;
+    border-color: #cae7cf;
+    color: #2f7e44;
   }
 
-  .status.synced {
-    background: #ebfaef;
-    border-color: #c6efce;
+  .status.embedded {
+    background: #e8f7eb;
+    border-color: #b8e0c1;
     color: #2a7c3f;
   }
 

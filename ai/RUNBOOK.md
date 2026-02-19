@@ -59,6 +59,14 @@ Use this section to resume quickly tomorrow.
 - DB migration for that change is `packages/core/drizzle/0003_known_roughhouse.sql`.
 - Estimate API now reports mode internally (`exact` or `lower_bound`); UI renders lower bound as `N+ msgs`.
 - Synced rows now hide ETA.
+- Catalog excludes bot accounts and deleted accounts.
+- Re-sync includes new-message catch-up for chats that were already fully backfilled.
+- Worker recovers from peer-cache misses (`not found in local cache`) by warming dialog cache.
+- Embeddings pipeline is now active: `/embeddings` UI + queue/runs/logs/checkpoints + per-chat reset.
+- `dev:userbot` now processes both sync runs and embedding runs in one worker process.
+- Embedding API endpoint resolution now preserves provider path prefixes (e.g. `/v1`) and logs non-JSON provider responses with body preview.
+- Runtime owner is now resolved from persisted MTProto session instead of `OWNER_TELEGRAM_ID` env.
+- Added backup helpers for chats/messages/media export and per-chat import recovery.
 
 ### Verified on real data
 
@@ -77,6 +85,18 @@ SYNC_ESTIMATE_CHAT_ID=256212219 bun run --filter @userbrot/userbot debug:estimat
 
 # DB/run/checkpoint coherence for one chat
 SYNC_VERIFY_CHAT_ID=256212219 bun run --filter @userbrot/userbot debug:verify-sync
+
+# embeddings provider probe on one chat (set EMBEDDINGS_PROBE_WRITE=1 to store sampled vectors)
+EMBEDDINGS_PROBE_CHAT_ID=479829705 bun run --filter @userbrot/userbot debug:probe-embeddings
+
+# embeddings DB/run/checkpoint coherence for one chat
+EMBEDDINGS_VERIFY_CHAT_ID=479829705 bun run --filter @userbrot/userbot debug:verify-embeddings
+
+# export full sync data backup (chats + messages + media)
+bun run --filter @userbrot/userbot backup:export-sync
+
+# import one chat from a backup snapshot directory
+SYNC_BACKUP_DIR=data/backups/<snapshot-dir> IMPORT_CHAT_PEER_ID=479829705 bun run --filter @userbrot/userbot backup:import-chat
 ```
 
 ### First steps tomorrow
@@ -85,6 +105,13 @@ SYNC_VERIFY_CHAT_ID=256212219 bun run --filter @userbrot/userbot debug:verify-sy
 2. Restart web + userbot dev processes.
 3. Smoke-test small chat (`256212219`): estimate -> start sync -> verify UI and `debug:verify-sync` output.
 4. Controlled large chat test (`752041694`) to validate flood-wait recovery and monotonic checkpoint progress.
+
+### Embeddings implementation status
+
+1. Added embeddings schema + migration (`pgvector` extension, per-message vectors, embedding run/checkpoint tables).
+2. Added embeddings worker loop (claim queued run, batch generate, retry/backoff, resumable checkpoints).
+3. Added `/embeddings` UI page with per-chat status, progress, and reset actions.
+4. Remaining next: wire hybrid retrieval (vector + FTS) into `ragService` behind feature gating.
 
 ## RAG + Sync implementation tracker
 
@@ -130,8 +157,8 @@ If work pauses mid-way, resume from the first unchecked item.
 
 ### Future track (after current pass)
 
-- [ ] Add dedicated job management page (history, retry, cancel, inspect logs).
+- [ ] Add dedicated job management page (history, retry, cancel, inspect logs) for sync + embeddings.
 - [ ] Upgrade queue runtime to robust background jobs engine (recommended: Postgres-native `pg-boss`).
-- [ ] Add embeddings + hybrid retrieval (`pgvector` + FTS) and optional reranker.
+- [ ] Wire hybrid retrieval (`pgvector` + FTS) in `ragService` and optional reranker.
 - [ ] Add ingestion pipeline for media content (voice transcription, OCR, documents).
 - [ ] Add continuous sync via updates diff reconciliation for edits/deletes parity.

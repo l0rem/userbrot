@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { desc, eq } from "drizzle-orm";
 import { db } from "../db/client";
 import { mtprotoSessions, setupState, type SetupStatus } from "../db/schema";
 
@@ -26,6 +26,7 @@ type RequestCodeResult =
   | {
       status: "already_authorized";
       sessionString: string;
+      ownerTelegramId: bigint;
     };
 
 type SignInWithCodeResult =
@@ -37,6 +38,7 @@ type SignInWithCodeResult =
   | {
       success: true;
       sessionString: string;
+      ownerTelegramId: bigint;
     };
 
 export interface SetupGateway {
@@ -50,39 +52,45 @@ export interface SetupGateway {
   signInWithPassword(args: {
     password: string;
     authSessionString: string;
-  }): Promise<{ sessionString: string }>;
+  }): Promise<{ sessionString: string; ownerTelegramId: bigint }>;
 }
 
-async function ensureRow(ownerTelegramId: bigint) {
-  await db
-    .insert(setupState)
-    .values({ ownerTelegramId })
-    .onConflictDoNothing({ target: setupState.ownerTelegramId });
-}
-
-export async function getSetupStatus(ownerTelegramId: bigint): Promise<SetupSummary> {
-  await ensureRow(ownerTelegramId);
-
+async function getSetupRow() {
   const row = await db.query.setupState.findFirst({
-    where: eq(setupState.ownerTelegramId, ownerTelegramId)
+    orderBy: [desc(setupState.id)]
   });
 
-  if (!row) {
-    return { status: "not_configured", requiresPassword: false };
+  if (row) {
+    return row;
   }
 
+  const inserted = await db
+    .insert(setupState)
+    .values({
+      status: "not_configured",
+      requiresPassword: false,
+      updatedAt: new Date()
+    })
+    .returning();
+
+  return inserted[0];
+}
+
+export async function getSetupStatus(_ownerTelegramId?: bigint): Promise<SetupSummary> {
+  const row = await getSetupRow();
   return {
     status: row.status,
     requiresPassword: row.requiresPassword
   };
 }
 
-async function persistConfiguredSession(ownerTelegramId: bigint, sessionString: string): Promise<void> {
+async function persistConfiguredSession(sessionString: string, ownerTelegramId: bigint): Promise<void> {
   await db
     .insert(mtprotoSessions)
     .values({
       ownerTelegramId,
-      sessionString
+      sessionString,
+      updatedAt: new Date()
     })
     .onConflictDoUpdate({
       target: mtprotoSessions.ownerTelegramId,
@@ -92,6 +100,7 @@ async function persistConfiguredSession(ownerTelegramId: bigint, sessionString: 
       }
     });
 
+  const row = await getSetupRow();
   await db
     .update(setupState)
     .set({
@@ -102,30 +111,23 @@ async function persistConfiguredSession(ownerTelegramId: bigint, sessionString: 
       authSessionString: null,
       updatedAt: new Date()
     })
-    .where(eq(setupState.ownerTelegramId, ownerTelegramId));
+    .where(eq(setupState.id, row.id));
 }
 
 export async function startSetup(
-  ownerTelegramId: bigint,
+  _ownerTelegramId: bigint | undefined,
   phone: string,
   gateway: SetupGateway
 ): Promise<StartSetupResult> {
-  const current = await getSetupStatus(ownerTelegramId);
-  if (current.status === "configured") {
-    return {
-      status: current.status,
-      requiresPassword: false
-    };
+  const row = await getSetupRow();
+  if (row.status === "configured") {
+    return { status: "configured", requiresPassword: false };
   }
 
   const code = await gateway.requestCode(phone);
-
   if (code.status === "already_authorized") {
-    await persistConfiguredSession(ownerTelegramId, code.sessionString);
-    return {
-      status: "configured",
-      requiresPassword: false
-    };
+    await persistConfiguredSession(code.sessionString, code.ownerTelegramId);
+    return { status: "configured", requiresPassword: false };
   }
 
   await db
@@ -138,7 +140,7 @@ export async function startSetup(
       requiresPassword: false,
       updatedAt: new Date()
     })
-    .where(eq(setupState.ownerTelegramId, ownerTelegramId));
+    .where(eq(setupState.id, row.id));
 
   return {
     status: "awaiting_code",
@@ -148,26 +150,14 @@ export async function startSetup(
 }
 
 export async function verifySetupCode(
-  ownerTelegramId: bigint,
-  args: {
-    code?: string;
-    password?: string;
-  },
+  _ownerTelegramId: bigint | undefined,
+  args: { code?: string; password?: string },
   gateway: SetupGateway
 ): Promise<VerifySetupResult> {
-  const row = await db.query.setupState.findFirst({
-    where: eq(setupState.ownerTelegramId, ownerTelegramId)
-  });
-
-  if (!row) {
-    throw new Error("Setup has not started yet");
-  }
+  const row = await getSetupRow();
 
   if (row.status === "configured") {
-    return {
-      success: true,
-      status: "configured"
-    };
+    return { success: true, status: "configured" };
   }
 
   if (row.status !== "awaiting_code" && row.status !== "awaiting_password") {
@@ -178,7 +168,6 @@ export async function verifySetupCode(
     if (!row.phone || !row.phoneCodeHash || !row.authSessionString) {
       throw new Error("Setup state is incomplete. Start setup again.");
     }
-
     if (!args.code) {
       throw new Error("Verification code is required");
     }
@@ -199,26 +188,18 @@ export async function verifySetupCode(
           authSessionString: result.authSessionString,
           updatedAt: new Date()
         })
-        .where(eq(setupState.ownerTelegramId, ownerTelegramId));
+        .where(eq(setupState.id, row.id));
 
-      return {
-        success: false,
-        status: "awaiting_password"
-      };
+      return { success: false, status: "awaiting_password" };
     }
 
-    await persistConfiguredSession(ownerTelegramId, result.sessionString);
-
-    return {
-      success: true,
-      status: "configured"
-    };
+    await persistConfiguredSession(result.sessionString, result.ownerTelegramId);
+    return { success: true, status: "configured" };
   }
 
   if (!row.authSessionString) {
     throw new Error("Missing pending authorization session. Restart setup.");
   }
-
   if (!args.password) {
     throw new Error("2FA password is required");
   }
@@ -227,17 +208,13 @@ export async function verifySetupCode(
     password: args.password,
     authSessionString: row.authSessionString
   });
-
-  await persistConfiguredSession(ownerTelegramId, result.sessionString);
-
-  return {
-    success: true,
-    status: "configured"
-  };
+  await persistConfiguredSession(result.sessionString, result.ownerTelegramId);
+  return { success: true, status: "configured" };
 }
 
-export async function resetSetup(ownerTelegramId: bigint): Promise<void> {
-  await db.delete(mtprotoSessions).where(eq(mtprotoSessions.ownerTelegramId, ownerTelegramId));
+export async function resetSetup(_ownerTelegramId?: bigint): Promise<void> {
+  await db.delete(mtprotoSessions);
+  const row = await getSetupRow();
   await db
     .update(setupState)
     .set({
@@ -248,5 +225,17 @@ export async function resetSetup(ownerTelegramId: bigint): Promise<void> {
       requiresPassword: false,
       updatedAt: new Date()
     })
-    .where(eq(setupState.ownerTelegramId, ownerTelegramId));
+    .where(eq(setupState.id, row.id));
+}
+
+export async function getRuntimeOwnerTelegramId(): Promise<bigint> {
+  const session = await db.query.mtprotoSessions.findFirst({
+    orderBy: [desc(mtprotoSessions.updatedAt)]
+  });
+
+  if (!session) {
+    throw new Error("No MTProto session found. Complete setup first.");
+  }
+
+  return session.ownerTelegramId;
 }

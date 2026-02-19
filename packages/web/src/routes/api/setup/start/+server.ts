@@ -12,7 +12,7 @@ const bodySchema = z.object({
 export const POST: RequestHandler = async (event) => {
   try {
     const payload = bodySchema.parse(await event.request.json());
-    const ownerTelegramId = resolveOwnerId(event);
+    const ownerTelegramId = await resolveOwnerId(event);
     const result = await startSetup(ownerTelegramId, payload.phone, setupGateway);
     return json(result);
   } catch (error) {

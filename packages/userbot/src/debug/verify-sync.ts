@@ -9,8 +9,7 @@ import {
   syncTargets,
   telegramChats
 } from "@userbrot/core";
-import { getOwnerTelegramId } from "@userbrot/core/env";
-import { and, desc, eq, sql } from "drizzle-orm";
+import { desc, eq, sql } from "drizzle-orm";
 
 const rawChatId = process.env.SYNC_VERIFY_CHAT_ID;
 if (!rawChatId || !/^\d+$/.test(rawChatId)) {
@@ -20,30 +19,18 @@ if (!rawChatId || !/^\d+$/.test(rawChatId)) {
 
 const chatPeerId = BigInt(rawChatId);
 
-const ownerFromEnv = getOwnerTelegramId();
-const inferredSession = ownerFromEnv
-  ? null
-  : await db.query.mtprotoSessions.findFirst({
-      orderBy: [desc(mtprotoSessions.createdAt)]
-    });
-const ownerTelegramId = ownerFromEnv ?? inferredSession?.ownerTelegramId;
-
-if (!ownerTelegramId) {
-  console.error("Could not resolve owner Telegram ID. Set OWNER_TELEGRAM_ID or complete setup first.");
-  await dbSql.end({ timeout: 5 }).catch(() => undefined);
-  process.exit(1);
-}
+await db.query.mtprotoSessions.findFirst({ orderBy: [desc(mtprotoSessions.createdAt)] });
 
 try {
   const [chatRow, targetRow, checkpointRow] = await Promise.all([
     db.query.telegramChats.findFirst({
-      where: and(eq(telegramChats.ownerTelegramId, ownerTelegramId), eq(telegramChats.peerId, chatPeerId))
+      where: eq(telegramChats.peerId, chatPeerId)
     }),
     db.query.syncTargets.findFirst({
-      where: and(eq(syncTargets.ownerTelegramId, ownerTelegramId), eq(syncTargets.chatPeerId, chatPeerId))
+      where: eq(syncTargets.chatPeerId, chatPeerId)
     }),
     db.query.syncCheckpoints.findFirst({
-      where: and(eq(syncCheckpoints.ownerTelegramId, ownerTelegramId), eq(syncCheckpoints.chatPeerId, chatPeerId))
+      where: eq(syncCheckpoints.chatPeerId, chatPeerId)
     })
   ]);
 
@@ -51,17 +38,12 @@ try {
   const target = targetRow ?? null;
   const checkpoint = checkpointRow ?? null;
 
-  const storedMessages = await countStoredChatMessages(ownerTelegramId, chatPeerId);
+  const storedMessages = await countStoredChatMessages(0n, chatPeerId);
 
   const runCandidates = await db
     .select()
     .from(syncRuns)
-    .where(
-      and(
-        eq(syncRuns.ownerTelegramId, ownerTelegramId),
-        sql`${syncRuns.chatPeerIds} @> ${JSON.stringify([chatPeerId.toString()])}::jsonb`
-      )
-    )
+    .where(sql`${syncRuns.chatPeerIds} @> ${JSON.stringify([chatPeerId.toString()])}::jsonb`)
     .orderBy(desc(syncRuns.createdAt))
     .limit(1);
 
@@ -69,7 +51,7 @@ try {
 
   const recentLogs = latestRun
     ? await db.query.syncRunLogs.findMany({
-        where: and(eq(syncRunLogs.ownerTelegramId, ownerTelegramId), eq(syncRunLogs.runId, latestRun.id)),
+        where: eq(syncRunLogs.runId, latestRun.id),
         orderBy: [desc(syncRunLogs.createdAt)],
         limit: 8
       })
@@ -85,7 +67,7 @@ try {
     }));
 
   console.log({
-    ownerTelegramId: ownerTelegramId.toString(),
+    ownerTelegramId: "singleton",
     chatPeerId: chatPeerId.toString(),
     chat: chat
       ? {

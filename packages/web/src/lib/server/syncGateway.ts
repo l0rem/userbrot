@@ -60,12 +60,9 @@ function parseFolderTitle(filter: tl.TypeDialogFilter): string {
   return "Folder";
 }
 
-async function withOwnerClient<T>(
-  ownerTelegramId: bigint,
-  fn: (client: TelegramClient) => Promise<T>
-): Promise<T> {
+async function withOwnerClient<T>(fn: (client: TelegramClient) => Promise<T>): Promise<T> {
   const session = await db.query.mtprotoSessions.findFirst({
-    where: (table, operators) => operators.eq(table.ownerTelegramId, ownerTelegramId)
+    orderBy: (table, operators) => [operators.desc(table.updatedAt)]
   });
 
   if (!session) {
@@ -117,8 +114,29 @@ function parseDialogPinned(dialog: unknown): boolean {
   return false;
 }
 
-export async function fetchPrivateDialogsCatalog(ownerTelegramId: bigint): Promise<SyncCatalogSnapshot> {
-  return withOwnerClient(ownerTelegramId, async (client) => {
+function parsePeerDeleted(peer: unknown): boolean {
+  if (typeof peer !== "object" || peer === null) {
+    return false;
+  }
+
+  const maybePeer = peer as {
+    isDeleted?: unknown;
+    deleted?: unknown;
+  };
+
+  if (typeof maybePeer.isDeleted === "boolean") {
+    return maybePeer.isDeleted;
+  }
+
+  if (typeof maybePeer.deleted === "boolean") {
+    return maybePeer.deleted;
+  }
+
+  return false;
+}
+
+export async function fetchPrivateDialogsCatalog(_ownerTelegramId: bigint): Promise<SyncCatalogSnapshot> {
+  return withOwnerClient(async (client) => {
     const folderResponse = await client.getFolders();
     const customFolders: CustomFolder[] = [];
     const folders: SyncFolder[] = [
@@ -157,6 +175,10 @@ export async function fetchPrivateDialogsCatalog(ownerTelegramId: bigint): Promi
     })) {
       const peer = dialog.peer;
       if (peer.type !== "user") {
+        continue;
+      }
+
+      if (peer.isBot || parsePeerDeleted(peer)) {
         continue;
       }
 
@@ -204,7 +226,7 @@ export async function estimateChatBackfill(
   chatPeerId: bigint,
   _resumeOldestMessageId?: number | null
 ): Promise<BackfillEstimate> {
-  return withOwnerClient(ownerTelegramId, async (client) => {
+  return withOwnerClient(async (client) => {
     const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
     const safeGetHistory = async <T>(fn: () => Promise<T>): Promise<T> => {

@@ -5,7 +5,7 @@ import { resolveOwnerId } from "$lib/server/setupContext";
 
 export const load: PageServerLoad = async (event) => {
   const env = getEnv();
-  const ownerTelegramId = resolveOwnerId(event);
+  const ownerTelegramId = await resolveOwnerId(event);
   const initialSetup = await getSetupStatus(ownerTelegramId);
 
   return {

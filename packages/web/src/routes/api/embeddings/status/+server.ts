@@ -1,4 +1,8 @@
-import { getSyncStatusSnapshot, listSyncCatalogChats } from "@userbrot/core/services/syncService";
+import { requireEmbeddingProviderConfig } from "@userbrot/core/env";
+import {
+  getEmbeddingStatusSnapshot,
+  listEmbeddingCatalogChats
+} from "@userbrot/core/services/embeddingsService";
 import { json } from "@sveltejs/kit";
 import type { RequestHandler } from "./$types";
 import { resolveOwnerId } from "$lib/server/setupContext";
@@ -6,10 +10,12 @@ import { resolveOwnerId } from "$lib/server/setupContext";
 export const GET: RequestHandler = async (event) => {
   try {
     const ownerTelegramId = await resolveOwnerId(event);
-    const snapshot = await getSyncStatusSnapshot(ownerTelegramId);
-    const chats = await listSyncCatalogChats(ownerTelegramId);
+    const snapshot = await getEmbeddingStatusSnapshot(ownerTelegramId);
+    const model = requireEmbeddingProviderConfig().model;
+    const chats = await listEmbeddingCatalogChats(ownerTelegramId, model);
 
     return json({
+      model,
       activeRun: snapshot.activeRun
         ? {
             ...snapshot.activeRun,

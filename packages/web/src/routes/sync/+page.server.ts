@@ -4,7 +4,7 @@ import type { PageServerLoad } from "./$types";
 import { resolveOwnerId } from "$lib/server/setupContext";
 
 export const load: PageServerLoad = async (event) => {
-  const ownerTelegramId = resolveOwnerId(event);
+  const ownerTelegramId = await resolveOwnerId(event);
   const setup = await getSetupStatus(ownerTelegramId);
 
   if (setup.status !== "configured") {

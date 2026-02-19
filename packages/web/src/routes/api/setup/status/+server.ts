@@ -5,7 +5,7 @@ import { resolveOwnerId } from "$lib/server/setupContext";
 
 export const GET: RequestHandler = async (event) => {
   try {
-    const ownerTelegramId = resolveOwnerId(event);
+    const ownerTelegramId = await resolveOwnerId(event);
     const status = await getSetupStatus(ownerTelegramId);
     return json(status);
   } catch (error) {

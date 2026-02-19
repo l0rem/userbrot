@@ -1,7 +1,6 @@
 import { countStoredChatMessages, db, mtprotoSessions, requireMtprotoApiCredentials, sql } from "@userbrot/core";
-import { getOwnerTelegramId } from "@userbrot/core/env";
 import { MemoryStorage, TelegramClient, tl } from "@mtcute/node";
-import { eq } from "drizzle-orm";
+import { desc } from "drizzle-orm";
 
 const rawChatId = process.env.SYNC_ESTIMATE_CHAT_ID;
 if (!rawChatId || !/^\d+$/.test(rawChatId)) {
@@ -12,12 +11,9 @@ if (!rawChatId || !/^\d+$/.test(rawChatId)) {
 const parsedMaxPages = Number.parseInt(process.env.SYNC_ESTIMATE_MAX_PAGES ?? "12", 10);
 const maxPages = Number.isFinite(parsedMaxPages) ? Math.min(Math.max(parsedMaxPages, 1), 50) : 12;
 
-const ownerTelegramId = getOwnerTelegramId();
-const session = ownerTelegramId
-  ? await db.query.mtprotoSessions.findFirst({
-      where: eq(mtprotoSessions.ownerTelegramId, ownerTelegramId)
-    })
-  : await db.query.mtprotoSessions.findFirst();
+const session = await db.query.mtprotoSessions.findFirst({
+  orderBy: [desc(mtprotoSessions.updatedAt)]
+});
 
 if (!session) {
   console.error("No MTProto session found. Complete setup first.");
@@ -25,7 +21,7 @@ if (!session) {
   process.exit(1);
 }
 
-const resolvedOwnerTelegramId = ownerTelegramId ?? session.ownerTelegramId;
+const resolvedOwnerTelegramId = session.ownerTelegramId;
 const { apiId, apiHash } = requireMtprotoApiCredentials();
 const client = new TelegramClient({
   apiId,

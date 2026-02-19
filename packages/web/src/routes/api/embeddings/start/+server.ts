@@ -1,4 +1,5 @@
-import { enqueueSyncRun } from "@userbrot/core/services/syncService";
+import { requireEmbeddingProviderConfig } from "@userbrot/core/env";
+import { enqueueEmbeddingRun } from "@userbrot/core/services/embeddingsService";
 import { json } from "@sveltejs/kit";
 import { z } from "zod";
 import type { RequestHandler } from "./$types";
@@ -14,9 +15,10 @@ export const POST: RequestHandler = async (event) => {
   try {
     const ownerTelegramId = await resolveOwnerId(event);
     const payload = bodySchema.parse(await event.request.json());
+    const model = requireEmbeddingProviderConfig().model;
     const chatPeerIds = payload.chatPeerIds.map((value) => BigInt(value));
 
-    const run = await enqueueSyncRun(ownerTelegramId, chatPeerIds);
+    const run = await enqueueEmbeddingRun(ownerTelegramId, chatPeerIds, model);
 
     return json({
       run: {
@@ -29,7 +31,7 @@ export const POST: RequestHandler = async (event) => {
   } catch (error) {
     const message =
       error instanceof z.ZodError
-        ? `Select between 1 and ${MAX_CHAT_SELECTION} chats to start a sync run`
+        ? `Select between 1 and ${MAX_CHAT_SELECTION} chats to start embeddings`
         : error instanceof Error
           ? error.message
           : String(error);
