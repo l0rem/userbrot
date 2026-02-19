@@ -132,6 +132,14 @@ bun run --filter @userbrot/userbot backup:export-sync
 SYNC_BACKUP_DIR=data/backups/<snapshot-dir> IMPORT_CHAT_PEER_ID=479829705 bun run --filter @userbrot/userbot backup:import-chat
 ```
 
+Bot chat commands (inside Telegram):
+
+- `/ask <question>` - ask over synced + embedded chat history
+- plain text message - treated like `/ask`
+- `/topic where` - inspect current private-topic context (`message_thread_id`)
+- `/topic create <name>` - create a topic in private chat
+- `/topic send <thread_id> <text>` - send to a specific private topic
+
 ---
 
 ## Current status
@@ -146,7 +154,7 @@ Implemented:
 - embeddings operations UI (`/embeddings`) with per-chat estimates, run logs, reset selected chats, and full debug clear
 - embeddings worker loop in `dev:userbot` (single process handling both sync and embeddings queues) with retry/backoff, resumable checkpoints, and restart-safe run pickup
 - embeddings run controls: stop active run from UI and resume remaining messages on next start
-- minimal bot Q&A over synced messages (`/ask` or plain text) with thread/topic reply context preserved
+- minimal bot Q&A over synced messages (`/ask` or plain text) with thread/topic reply context preserved and draft-streamed answer generation
 
 Progress snapshot (2026-02-19):
 

@@ -18,6 +18,10 @@ export type RagAnswer = {
   model: string;
 };
 
+type RagAnswerOptions = {
+  onPartialAnswer?: (partialAnswer: string) => Promise<void> | void;
+};
+
 type CandidateRow = {
   chatPeerId: bigint;
   messageId: number;
@@ -118,7 +122,10 @@ function renderEvidence(candidates: CandidateRow[]): string {
     .join("\n\n");
 }
 
-export async function answerQuestionFromSyncedChats(question: string): Promise<RagAnswer> {
+export async function answerQuestionFromSyncedChats(
+  question: string,
+  options: RagAnswerOptions = {}
+): Promise<RagAnswer> {
   const trimmed = question.trim();
   if (trimmed.length < 2) {
     throw new Error("Question is too short");
@@ -142,24 +149,53 @@ export async function answerQuestionFromSyncedChats(question: string): Promise<R
 
   const evidence = renderEvidence(candidates);
 
-  const completion = await client.chat.completions.create({
+  const completionRequest = {
     model: llm.model,
     temperature: 0.2,
     messages: [
       {
-        role: "system",
+        role: "system" as const,
         content:
           "You answer questions strictly using provided Telegram chat evidence. If evidence is insufficient, say so clearly. Keep answers concise and factual."
       },
       {
-        role: "user",
+        role: "user" as const,
         content:
           `Question:\n${trimmed}\n\nEvidence:\n${evidence}\n\nReturn a direct answer. Mention uncertainty explicitly when needed.`
       }
     ]
-  });
+  };
 
-  const answer = completion.choices[0]?.message?.content?.trim();
+  let answer = "";
+  const onPartialAnswer = options.onPartialAnswer;
+
+  if (onPartialAnswer) {
+    try {
+      const stream = await client.chat.completions.create({
+        ...completionRequest,
+        stream: true
+      });
+
+      for await (const chunk of stream) {
+        const delta = chunk.choices[0]?.delta?.content;
+        if (typeof delta !== "string" || delta.length === 0) {
+          continue;
+        }
+
+        answer += delta;
+        await onPartialAnswer(answer);
+      }
+    } catch {
+      answer = "";
+    }
+  }
+
+  if (!answer.trim()) {
+    const completion = await client.chat.completions.create(completionRequest);
+    answer = completion.choices[0]?.message?.content ?? "";
+  }
+
+  const normalizedAnswer = answer.trim();
   const citations: RagCitation[] = candidates.slice(0, 5).map((row) => ({
     chatPeerId: row.chatPeerId,
     chatTitle: row.chatTitle,
@@ -169,7 +205,7 @@ export async function answerQuestionFromSyncedChats(question: string): Promise<R
   }));
 
   return {
-    answer: answer && answer.length > 0 ? answer : "I could not generate an answer.",
+    answer: normalizedAnswer.length > 0 ? normalizedAnswer : "I could not generate an answer.",
     citations,
     model: llm.model
   };

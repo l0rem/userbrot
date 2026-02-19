@@ -13,32 +13,163 @@ type ReplyThreadParams = {
   direct_messages_topic_id?: number;
 };
 
-function parseNumber(value: unknown): number | null {
-  return typeof value === "number" && Number.isFinite(value) ? value : null;
+type IncomingPayload = Record<string, unknown>;
+
+type ChatInfo = {
+  chatId: number | null;
+  chatType: string | null;
+  threadId: number | null;
+  isTopicMessage: boolean;
+};
+
+type PrivateDraftTarget = {
+  chatId: number;
+  messageThreadId?: number;
+};
+
+type ReplyContext = {
+  payload: unknown;
+  send: (text: string, params?: ReplyThreadParams) => Promise<unknown>;
+};
+
+function parseInteger(value: unknown): number | null {
+  return typeof value === "number" && Number.isInteger(value) ? value : null;
 }
 
-function extractThreadParams(payload: Record<string, unknown>): ReplyThreadParams {
+function truncateTelegramText(text: string): string {
+  if (text.length <= 4096) {
+    return text;
+  }
+
+  return `${text.slice(0, 4095)}…`;
+}
+
+function createDraftId(): number {
+  return Math.floor(Math.random() * 2_000_000_000) + 1;
+}
+
+function extractThreadParams(payload: IncomingPayload): ReplyThreadParams {
   const threadParams: ReplyThreadParams = {};
 
-  const threadId = parseNumber(payload.message_thread_id);
+  const threadId = parseInteger(payload.message_thread_id);
   if (threadId !== null) {
     threadParams.message_thread_id = threadId;
   }
 
-  const directTopicId = parseNumber(payload.direct_messages_topic_id);
+  const directTopicId = parseInteger(payload.direct_messages_topic_id);
   if (directTopicId !== null) {
     threadParams.direct_messages_topic_id = directTopicId;
   }
 
   const directTopic = payload.direct_messages_topic;
   if (typeof directTopic === "object" && directTopic !== null) {
-    const topicId = parseNumber((directTopic as { topic_id?: unknown }).topic_id);
+    const topicId = parseInteger((directTopic as { topic_id?: unknown }).topic_id);
     if (topicId !== null) {
       threadParams.direct_messages_topic_id = topicId;
     }
   }
 
   return threadParams;
+}
+
+function extractChatInfo(payload: IncomingPayload): ChatInfo {
+  const chat = payload.chat;
+  const threadId = parseInteger(payload.message_thread_id);
+  const isTopicMessage = payload.is_topic_message === true;
+
+  if (typeof chat !== "object" || chat === null) {
+    return {
+      chatId: null,
+      chatType: null,
+      threadId,
+      isTopicMessage
+    };
+  }
+
+  const chatId = parseInteger((chat as { id?: unknown }).id);
+  const rawType = (chat as { type?: unknown }).type;
+  const chatType = typeof rawType === "string" ? rawType : null;
+
+  return {
+    chatId,
+    chatType,
+    threadId,
+    isTopicMessage
+  };
+}
+
+function extractPrivateDraftTarget(payload: IncomingPayload): PrivateDraftTarget | null {
+  const chat = extractChatInfo(payload);
+  if (chat.chatType !== "private" || chat.chatId === null) {
+    return null;
+  }
+
+  return {
+    chatId: chat.chatId,
+    messageThreadId: chat.threadId ?? undefined
+  };
+}
+
+function buildCitationLine(citations: Array<{ chatTitle: string; messageId: number }>): string {
+  if (citations.length === 0) {
+    return "";
+  }
+
+  return `\n\nSources: ${citations
+    .slice(0, 3)
+    .map((item) => `${item.chatTitle}#${item.messageId}`)
+    .join(", ")}`;
+}
+
+async function answerWithStreamingDraft(context: ReplyContext, question: string): Promise<void> {
+  const payload = context.payload as IncomingPayload;
+  const threadParams = extractThreadParams(payload);
+  const draftTarget = extractPrivateDraftTarget(payload);
+  const draftId = createDraftId();
+
+  let draftStreamingEnabled = Boolean(draftTarget);
+  let lastDraftText = "";
+  let lastDraftSentAt = 0;
+
+  const pushDraft = async (value: string, force: boolean): Promise<void> => {
+    if (!draftStreamingEnabled || !draftTarget) {
+      return;
+    }
+
+    const nextDraft = truncateTelegramText(value.trim());
+    if (!nextDraft || nextDraft === lastDraftText) {
+      return;
+    }
+
+    const now = Date.now();
+    if (!force && now - lastDraftSentAt < 700 && nextDraft.length - lastDraftText.length < 80) {
+      return;
+    }
+
+    try {
+      await bot.api.sendMessageDraft({
+        chat_id: draftTarget.chatId,
+        message_thread_id: draftTarget.messageThreadId,
+        draft_id: draftId,
+        text: nextDraft
+      });
+      lastDraftText = nextDraft;
+      lastDraftSentAt = now;
+    } catch {
+      draftStreamingEnabled = false;
+    }
+  };
+
+  const result = await answerQuestionFromSyncedChats(question, {
+    onPartialAnswer: async (partialAnswer) => {
+      await pushDraft(partialAnswer, false);
+    }
+  });
+
+  await pushDraft(result.answer, true);
+
+  const citationLine = buildCitationLine(result.citations);
+  await context.send(`${result.answer}${citationLine}`, threadParams);
 }
 
 if (!supportsTelegramWebApp) {
@@ -85,31 +216,92 @@ const bot = new Bot(token)
         "To enable the in-chat setup button, expose web app via HTTPS tunnel and set WEB_APP_URL to that public URL."
     );
   })
+  .command("topic", async (context) => {
+    const payload = context.payload as unknown as IncomingPayload;
+    const threadParams = extractThreadParams(payload);
+    const chatInfo = extractChatInfo(payload);
+    const args = context.args?.trim() ?? "";
+
+    if (!args || /^where$/i.test(args)) {
+      await context.send(
+        `Topic context\nchat_type=${chatInfo.chatType ?? "unknown"}\nchat_id=${chatInfo.chatId ?? "unknown"}\nmessage_thread_id=${chatInfo.threadId ?? "none"}\nis_topic_message=${chatInfo.isTopicMessage ? "yes" : "no"}`,
+        threadParams
+      );
+      return;
+    }
+
+    if (chatInfo.chatType !== "private" || chatInfo.chatId === null) {
+      await context.send("/topic commands are supported only in your private chat with this bot.", threadParams);
+      return;
+    }
+
+    const createMatch = args.match(/^create\s+(.+)$/i);
+    if (createMatch) {
+      const topicName = createMatch[1]?.trim();
+      if (!topicName) {
+        await context.send("Usage: /topic create <name>", threadParams);
+        return;
+      }
+
+      try {
+        const created = await bot.api.createForumTopic({
+          chat_id: chatInfo.chatId,
+          name: topicName
+        });
+
+        await context.send(
+          `Created topic \"${created.name}\" with thread id ${created.message_thread_id}.`,
+          { message_thread_id: created.message_thread_id }
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        await context.send(`Failed to create topic: ${message}`, threadParams);
+      }
+      return;
+    }
+
+    const sendMatch = args.match(/^send\s+(\d+)\s+([\s\S]+)$/i);
+    if (sendMatch) {
+      const targetThreadId = Number.parseInt(sendMatch[1] ?? "", 10);
+      const text = sendMatch[2]?.trim() ?? "";
+
+      if (!Number.isInteger(targetThreadId) || targetThreadId <= 0 || text.length === 0) {
+        await context.send("Usage: /topic send <thread_id> <text>", threadParams);
+        return;
+      }
+
+      try {
+        await bot.api.sendMessage({
+          chat_id: chatInfo.chatId,
+          message_thread_id: targetThreadId,
+          text: truncateTelegramText(text)
+        });
+        await context.send(`Sent to topic ${targetThreadId}.`, threadParams);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        await context.send(`Failed to send into topic ${targetThreadId}: ${message}`, threadParams);
+      }
+      return;
+    }
+
+    await context.send(
+      "Usage:\n/topic where\n/topic create <name>\n/topic send <thread_id> <text>",
+      threadParams
+    );
+  })
   .command("ask", async (context) => {
-    const text = context.text ?? "";
-    const question = text.replace(/^\/ask(?:@\w+)?\s*/i, "").trim();
+    const question = context.args?.trim() ?? "";
 
     if (!question) {
       await context.send("Usage: /ask <question>");
       return;
     }
 
-    const threadParams = extractThreadParams(context.payload as unknown as Record<string, unknown>);
-
     try {
-      const result = await answerQuestionFromSyncedChats(question);
-
-      const citationLine =
-        result.citations.length > 0
-          ? `\n\nSources: ${result.citations
-              .slice(0, 3)
-              .map((item) => `${item.chatTitle}#${item.messageId}`)
-              .join(", ")}`
-          : "";
-
-      await context.send(`${result.answer}${citationLine}`, threadParams);
+      await answerWithStreamingDraft(context, question);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      const threadParams = extractThreadParams(context.payload as unknown as IncomingPayload);
       await context.send(`Failed to answer question: ${message}`, threadParams);
     }
   })
@@ -119,22 +311,11 @@ const bot = new Bot(token)
       return;
     }
 
-    const threadParams = extractThreadParams(context.payload as unknown as Record<string, unknown>);
-
     try {
-      const result = await answerQuestionFromSyncedChats(text);
-
-      const citationLine =
-        result.citations.length > 0
-          ? `\n\nSources: ${result.citations
-              .slice(0, 3)
-              .map((item) => `${item.chatTitle}#${item.messageId}`)
-              .join(", ")}`
-          : "";
-
-      await context.send(`${result.answer}${citationLine}`, threadParams);
+      await answerWithStreamingDraft(context, text);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      const threadParams = extractThreadParams(context.payload as unknown as IncomingPayload);
       await context.send(`Failed to answer question: ${message}`, threadParams);
     }
   })

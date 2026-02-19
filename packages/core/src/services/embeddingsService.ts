@@ -126,14 +126,26 @@ export async function listEmbeddingCatalogChats(_ownerTelegramId: bigint, model:
     .where(embeddableMessagePredicate())
     .groupBy(telegramMessages.chatPeerId);
 
-  const embeddedCounts = await db
-    .select({ chatPeerId: telegramMessageEmbeddings.chatPeerId, total: sql<number>`count(*)::int` })
-    .from(telegramMessageEmbeddings)
-    .where(eq(telegramMessageEmbeddings.model, model))
-    .groupBy(telegramMessageEmbeddings.chatPeerId);
+  const pendingCounts = await db
+    .select({ chatPeerId: telegramMessages.chatPeerId, total: sql<number>`count(*)::int` })
+    .from(telegramMessages)
+    .leftJoin(
+      telegramMessageEmbeddings,
+      and(
+        eq(telegramMessageEmbeddings.chatPeerId, telegramMessages.chatPeerId),
+        eq(telegramMessageEmbeddings.messageId, telegramMessages.messageId)
+      )
+    )
+    .where(
+      and(
+        embeddableMessagePredicate(),
+        sql`(${telegramMessageEmbeddings.id} is null or ${telegramMessageEmbeddings.model} <> ${model} or ${telegramMessageEmbeddings.sourceUpdatedAt} < ${telegramMessages.updatedAt})`
+      )
+    )
+    .groupBy(telegramMessages.chatPeerId);
 
   const eligibleByPeerId = new Map(eligibleCounts.map((item) => [item.chatPeerId.toString(), item.total]));
-  const embeddedByPeerId = new Map(embeddedCounts.map((item) => [item.chatPeerId.toString(), item.total]));
+  const pendingByPeerId = new Map(pendingCounts.map((item) => [item.chatPeerId.toString(), item.total]));
 
   const rows = await db
     .select({
@@ -162,8 +174,7 @@ export async function listEmbeddingCatalogChats(_ownerTelegramId: bigint, model:
   return rows.map((row) => {
     const key = row.peerId.toString();
     const eligible = eligibleByPeerId.get(key) ?? 0;
-    const embedded = embeddedByPeerId.get(key) ?? 0;
-    const computedPending = Math.max(eligible - embedded, 0);
+    const computedPending = pendingByPeerId.get(key) ?? 0;
     const selected = row.selected ?? false;
     const targetStatus = row.targetStatus ?? "pending";
     const checkpointDone = row.checkpointBackfillComplete ?? false;
@@ -177,8 +188,10 @@ export async function listEmbeddingCatalogChats(_ownerTelegramId: bigint, model:
     const shouldExposeEstimate = status === "embedding" || status === "embedded" || selected;
     const estimatedMessages = shouldExposeEstimate
       ? status === "embedded"
-        ? Math.max(eligible, embedded)
-        : (row.targetEstimatedMessages ?? computedPending)
+        ? eligible
+        : status === "pending"
+          ? computedPending
+          : (row.targetEstimatedMessages ?? computedPending)
       : null;
 
     return {
