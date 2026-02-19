@@ -16,7 +16,8 @@ const envSchema = z.object({
   LLM_MODEL: z.string().min(1).optional(),
   EMBEDDING_BASE_URL: z.string().url().optional(),
   EMBEDDING_API_KEY: z.string().optional(),
-  EMBEDDING_MODEL: z.string().min(1).optional()
+  EMBEDDING_MODEL: z.string().min(1).optional(),
+  AI_GRAPH_ENABLED: z.string().optional()
 });
 
 export type Env = z.infer<typeof envSchema>;

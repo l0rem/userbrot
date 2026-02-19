@@ -379,6 +379,71 @@ export const telegramMessageEmbeddings = pgTable(
   ]
 );
 
+export const aiConversationSurfaceEnum = pgEnum("ai_conversation_surface", [
+  "telegram_bot",
+  "web",
+  "api"
+]);
+
+export const aiConversationStatusEnum = pgEnum("ai_conversation_status", [
+  "active",
+  "archived"
+]);
+
+export const aiMessageRoleEnum = pgEnum("ai_message_role", [
+  "system",
+  "user",
+  "assistant",
+  "tool"
+]);
+
+export const aiConversations = pgTable(
+  "ai_conversations",
+  {
+    id: serial("id").primaryKey(),
+    surface: aiConversationSurfaceEnum("surface").notNull(),
+    externalChatId: text("external_chat_id").notNull(),
+    externalThreadId: text("external_thread_id"),
+    status: aiConversationStatusEnum("status").default("active").notNull(),
+    title: text("title"),
+    lastMessageAt: timestamp("last_message_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull()
+  },
+  (table) => [
+    uniqueIndex("ai_conversations_surface_thread_uq").on(
+      table.surface,
+      table.externalChatId,
+      table.externalThreadId
+    ),
+    index("ai_conversations_status_idx").on(table.status),
+    index("ai_conversations_last_message_at_idx").on(table.lastMessageAt)
+  ]
+);
+
+export const aiMessages = pgTable(
+  "ai_messages",
+  {
+    id: bigint("id", { mode: "bigint" }).primaryKey().generatedByDefaultAsIdentity(),
+    conversationId: integer("conversation_id").notNull(),
+    role: aiMessageRoleEnum("role").notNull(),
+    content: text("content").notNull(),
+    modelName: text("model_name"),
+    inputTokens: integer("input_tokens"),
+    outputTokens: integer("output_tokens"),
+    toolName: text("tool_name"),
+    toolCallId: text("tool_call_id"),
+    metadata: jsonb("metadata").$type<Record<string, unknown>>(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull()
+  },
+  (table) => [
+    index("ai_messages_conversation_created_idx").on(table.conversationId, table.createdAt)
+  ]
+);
+
+export type AiConversationSurface = (typeof aiConversationSurfaceEnum.enumValues)[number];
+export type AiConversationStatus = (typeof aiConversationStatusEnum.enumValues)[number];
+export type AiMessageRole = (typeof aiMessageRoleEnum.enumValues)[number];
 export type SetupStatus = (typeof setupStatusEnum.enumValues)[number];
 export type SyncTargetStatus = (typeof syncTargetStatusEnum.enumValues)[number];
 export type SyncRunStatus = (typeof syncRunStatusEnum.enumValues)[number];

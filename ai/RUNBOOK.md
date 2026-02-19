@@ -52,6 +52,31 @@ bun run build
 
 Use this section to resume quickly tomorrow.
 
+### LangGraph Conversation System (NEW)
+
+A new `@userbrot/ai` package has been added with LangGraph-based conversation orchestration:
+
+- **Package**: `packages/ai/` - shared AI orchestration layer
+- **Tables**: `ai_conversations` + `ai_messages` for persistent conversation memory
+- **Feature flag**: `AI_GRAPH_ENABLED=1` enables the new graph-based chat (default: enabled)
+- **Topic mapping**: Each Telegram topic/thread gets its own isolated conversation context
+- **UX**: "Thinking..." message + periodic typing action while generating
+
+**Key files:**
+- `packages/ai/src/chat/index.ts` - main `runConversationTurn()` API
+- `packages/ai/src/graph/` - LangGraph state + nodes
+- `packages/core/src/services/aiRepo.ts` - DB repositories
+
+**Commands:**
+- `/clear` - Clear current topic's conversation memory
+- `/ask` - Legacy RAG-based answer (bypasses graph, searches chats)
+- Plain text messages - Use LangGraph conversation with memory (when `AI_GRAPH_ENABLED=1`)
+
+**Phase 2 roadmap:**
+- Add planner/routing node for `general_knowledge` vs `personal_memory`
+- Add chat-retrieval as an explicit tool
+- Rebuild embeddings with hybrid retrieval (vector + FTS)
+
 ### Current sync state
 
 - Checkpoint model now uses dedicated `next_offset` for pagination resume.

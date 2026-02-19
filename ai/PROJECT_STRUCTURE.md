@@ -6,11 +6,24 @@ All runnable services and shared code live under `packages/`.
 
 ```text
 packages/
-  bot/          Telegram bot (GramIO)
-  userbot/      MTProto runtime (MTCute)
-  web/          SvelteKit setup UI + setup API
-  core/         Shared env, DB schema/client, setup services
+  ai/            LangGraph orchestration (shared AI brain)
+  bot/           Telegram bot (GramIO)
+  userbot/       MTProto runtime (MTCute)
+  web/           SvelteKit setup UI + setup API
+  core/          Shared env, DB schema/client, setup services
 ```
+
+## AI ownership (NEW)
+
+The `@userbrot/ai` package is the shared AI orchestration layer used by all interfaces (bot, web, future API):
+
+- `packages/ai/src/chat/index.ts` - main `runConversationTurn()` API
+- `packages/ai/src/graph/state.ts` - LangGraph state annotation
+- `packages/ai/src/graph/nodes/` - graph nodes (loadContext, generateResponse, persistResponse)
+- `packages/ai/src/memory/index.ts` - context assembly + LangChain message conversion
+- `packages/ai/src/prompts/index.ts` - system prompts
+- `packages/ai/src/tools/index.ts` - tool registry (placeholder for future tools)
+- `packages/ai/src/telemetry/index.ts` - graph step logging
 
 ## Core ownership
 
@@ -21,6 +34,7 @@ packages/
 - `packages/core/src/services/syncService.ts` - sync targets/runs/checkpoints/messages
 - `packages/core/src/services/embeddingsService.ts` - embeddings targets/runs/checkpoints/vector storage
 - `packages/core/src/services/ragService.ts` - minimal grounded Q&A retrieval/answering
+- `packages/core/src/services/aiRepo.ts` - AI conversation/message repositories
 
 ## Web ownership
 

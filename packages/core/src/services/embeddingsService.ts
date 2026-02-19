@@ -12,6 +12,112 @@ import {
   type EmbeddingRunStatus,
   type EmbeddingTargetStatus
 } from "../db/schema";
+import { requireEmbeddingProviderConfig } from "../env";
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function withSafeEmbeddingCall<T>(fn: () => Promise<T>): Promise<T> {
+  let attempt = 0;
+
+  while (attempt < 6) {
+    try {
+      return await fn();
+    } catch (error) {
+      if (error instanceof Error) {
+        const maybeStatus = error.message.match(/status\s+(\d{3})/i);
+        const statusCode = maybeStatus ? Number.parseInt(maybeStatus[1], 10) : null;
+        const shouldRetry = statusCode === 408 || statusCode === 409 || statusCode === 429 || statusCode === 500 || statusCode === 502 || statusCode === 503 || statusCode === 504 || statusCode === 529;
+
+        if (shouldRetry) {
+          const waitMs = Math.ceil(900 * (attempt + 1) + Math.random() * 600);
+          await sleep(waitMs);
+          attempt += 1;
+          continue;
+        }
+
+        const waitMatch = error.message.match(/wait of\s+(\d+)\s+seconds/i);
+        if (waitMatch) {
+          const waitSeconds = Number.parseInt(waitMatch[1], 10);
+          if (Number.isFinite(waitSeconds) && waitSeconds > 0) {
+            await sleep(Math.ceil(waitSeconds * 1000 * 1.1 + Math.random() * 700));
+            attempt += 1;
+            continue;
+          }
+        }
+      }
+
+      throw error;
+    }
+  }
+
+  throw new Error("Embedding call exceeded retry policy");
+}
+
+export async function embedBatch(texts: string[]): Promise<number[][]> {
+  const embeddingProvider = requireEmbeddingProviderConfig();
+  const base = new URL(embeddingProvider.baseUrl);
+  const endpoint = /\/embeddings\/?$/i.test(base.pathname)
+    ? base
+    : new URL("embeddings", embeddingProvider.baseUrl.endsWith("/") ? embeddingProvider.baseUrl : `${embeddingProvider.baseUrl}/`);
+
+  const payload = await withSafeEmbeddingCall(async () => {
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${embeddingProvider.apiKey}`
+      },
+      body: JSON.stringify({
+        model: embeddingProvider.model,
+        input: texts
+      })
+    });
+
+    const raw = await response.text();
+
+    if (!response.ok) {
+      throw new Error(`Embedding provider status ${response.status}: ${raw.slice(0, 220)}`);
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      const contentType = response.headers.get("content-type") ?? "unknown";
+      throw new Error(
+        `Embedding provider returned non-JSON response (content-type ${contentType}): ${raw.slice(0, 220)}`
+      );
+    }
+
+    return parsed as {
+      data?: Array<{ embedding?: unknown }>;
+    };
+  });
+
+  if (!payload.data || !Array.isArray(payload.data) || payload.data.length !== texts.length) {
+    throw new Error("Embedding provider returned invalid batch response");
+  }
+
+  return payload.data.map((item) => {
+    const vector = item.embedding;
+    if (!Array.isArray(vector)) {
+      throw new Error("Embedding response missing vector array");
+    }
+
+    const normalized = vector
+      .map((value) => (typeof value === "number" && Number.isFinite(value) ? value : null))
+      .filter((value): value is number => value !== null);
+
+    if (normalized.length === 0) {
+      throw new Error("Embedding vector is empty");
+    }
+
+    return normalized;
+  });
+}
+
 
 export type EmbeddingCatalogChat = {
   peerId: bigint;

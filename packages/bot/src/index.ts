@@ -1,5 +1,6 @@
 import { answerQuestionFromSyncedChats } from "@userbrot/core/services/ragService";
 import { getEnv, requireBotToken } from "@userbrot/core/env";
+import { runConversationTurn, type RunConversationResult } from "@userbrot/ai";
 import { Bot } from "gramio";
 
 const token = requireBotToken();
@@ -7,6 +8,8 @@ const webAppUrl = getEnv().WEB_APP_URL;
 const setupUrl = new URL("/setup", webAppUrl.endsWith("/") ? webAppUrl : `${webAppUrl}/`);
 const syncUrl = new URL("/sync", webAppUrl.endsWith("/") ? webAppUrl : `${webAppUrl}/`);
 const supportsTelegramWebApp = setupUrl.protocol === "https:";
+
+const AI_GRAPH_ENABLED = getEnv().AI_GRAPH_ENABLED === "1";
 
 type ReplyThreadParams = {
   message_thread_id?: number;
@@ -172,6 +175,59 @@ async function answerWithStreamingDraft(context: ReplyContext, question: string)
   await context.send(`${result.answer}${citationLine}`, threadParams);
 }
 
+async function answerWithLangGraph(
+  context: ReplyContext,
+  userInput: string
+): Promise<void> {
+  const payload = context.payload as IncomingPayload;
+  const threadParams = extractThreadParams(payload);
+  const chatInfo = extractChatInfo(payload);
+
+  if (!chatInfo.chatId) {
+    await context.send("Could not identify chat context.", threadParams);
+    return;
+  }
+
+  const thinkingMsg = await context.send("Thinking...", threadParams);
+
+  const typingInterval = setInterval(async () => {
+    try {
+      await bot.api.sendChatAction({
+        chat_id: chatInfo.chatId!,
+        action: "typing",
+        ...(chatInfo.threadId && { message_thread_id: chatInfo.threadId })
+      });
+    } catch {}
+  }, 4000);
+
+  try {
+    const result = await runConversationTurn({
+      surface: "telegram_bot",
+      externalChatId: String(chatInfo.chatId),
+      externalThreadId: chatInfo.threadId ? String(chatInfo.threadId) : null,
+      userInput
+    });
+
+    clearInterval(typingInterval);
+
+    const responseText = truncateTelegramText(result.assistantOutput);
+
+    try {
+      await bot.api.editMessageText({
+        chat_id: chatInfo.chatId!,
+        message_id: (thinkingMsg as { message_id: number }).message_id,
+        text: responseText
+      });
+    } catch {
+      await context.send(responseText, threadParams);
+    }
+  } catch (error) {
+    clearInterval(typingInterval);
+    const message = error instanceof Error ? error.message : String(error);
+    await context.send(`Failed to generate response: ${message}`, threadParams);
+  }
+}
+
 if (!supportsTelegramWebApp) {
   console.warn(
     `WEB_APP_URL is not HTTPS (${setupUrl.toString()}). Telegram Mini App buttons require HTTPS; falling back to text instructions.`
@@ -250,7 +306,7 @@ const bot = new Bot(token)
         });
 
         await context.send(
-          `Created topic \"${created.name}\" with thread id ${created.message_thread_id}.`,
+          `Created topic "${created.name}" with thread id ${created.message_thread_id}.`,
           { message_thread_id: created.message_thread_id }
         );
       } catch (error) {
@@ -305,6 +361,32 @@ const bot = new Bot(token)
       await context.send(`Failed to answer question: ${message}`, threadParams);
     }
   })
+  .command("clear", async (context) => {
+    const payload = context.payload as unknown as IncomingPayload;
+    const threadParams = extractThreadParams(payload);
+    const chatInfo = extractChatInfo(payload);
+
+    if (!chatInfo.chatId) {
+      await context.send("Could not identify chat context.", threadParams);
+      return;
+    }
+
+    const { messageRepo, conversationRepo } = await import("@userbrot/core");
+    const key = {
+      surface: "telegram_bot" as const,
+      externalChatId: String(chatInfo.chatId),
+      externalThreadId: chatInfo.threadId ? String(chatInfo.threadId) : null
+    };
+
+    try {
+      const conversation = await conversationRepo.findOrCreate(key);
+      await messageRepo.deleteForConversation(conversation.id);
+      await context.send("Conversation memory cleared. Starting fresh.", threadParams);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await context.send(`Failed to clear conversation: ${message}`, threadParams);
+    }
+  })
   .on("message", async (context) => {
     const text = context.text?.trim();
     if (!text || text.startsWith("/")) {
@@ -312,7 +394,11 @@ const bot = new Bot(token)
     }
 
     try {
-      await answerWithStreamingDraft(context, text);
+      if (AI_GRAPH_ENABLED) {
+        await answerWithLangGraph(context, text);
+      } else {
+        await answerWithStreamingDraft(context, text);
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const threadParams = extractThreadParams(context.payload as unknown as IncomingPayload);

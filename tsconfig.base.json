@@ -11,6 +11,12 @@
     "verbatimModuleSyntax": true,
     "baseUrl": ".",
     "paths": {
+      "@userbrot/ai": [
+        "packages/ai/src/index.ts"
+      ],
+      "@userbrot/ai/*": [
+        "packages/ai/src/*"
+      ],
       "@userbrot/core": [
         "packages/core/src/index.ts"
       ],
