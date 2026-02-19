@@ -4,5 +4,6 @@ export * from "./env";
 export * from "./services/aiRepo";
 export * from "./services/embeddingsService";
 export * from "./services/ragService";
+export * from "./services/agentTools";
 export * from "./services/setupService";
 export * from "./services/syncService";

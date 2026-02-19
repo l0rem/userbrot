@@ -194,6 +194,12 @@ async function answerWithLangGraph(
       userInput,
       onChunk: async (chunk: string) => {
         await pushDraft(lastDraftText + chunk, false);
+      },
+      onStatus: async (status: string) => {
+        // Render it instantly with an emphasize wrapper
+        await pushDraft(`_${status}_`, true);
+        // Clear lastDraftText so that when chunking resumes, it overrides the status
+        lastDraftText = "";
       }
     });
 
@@ -212,9 +218,20 @@ async function answerWithLangGraph(
 
     const responseText = truncateTelegramText(result.assistantOutput);
     const htmlOutput = telegramMarkdownToHtml(responseText);
-    await context.send(htmlOutput, { ...threadParams, parse_mode: "HTML" });
+
+    try {
+      await context.send(htmlOutput, { ...threadParams, parse_mode: "HTML" });
+    } catch (sendError) {
+      console.error("[answerWithLangGraph] HTML send failed, falling back to plain text:", sendError);
+      console.error("[answerWithLangGraph] Problematic HTML:", htmlOutput.slice(0, 500));
+      const plainOutput = responseText
+        .replace(/[<>]/g, "")
+        .replace(/[&]/g, "and");
+      await context.send(plainOutput, threadParams);
+    }
   } catch (error) {
     clearInterval(typingInterval);
+    console.error("[answerWithLangGraph] Error:", error);
     const message = error instanceof Error ? error.message : String(error);
     await context.send(`Failed to generate response: ${message}`, threadParams);
   }
